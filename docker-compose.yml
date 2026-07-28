@@ -1,0 +1,79 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: esp32_tourney
+      POSTGRES_USER: tourney_user
+      POSTGRES_PASSWORD: changeme
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # ── Redis ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # ── MQTT Broker (Mosquitto) ──────────────────────────────────
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"    # WebSockets for browser MQTT clients
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+
+  # ── NestJS Backend ───────────────────────────────────────────
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+      - mosquitto
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: esp32_tourney
+      DB_USER: tourney_user
+      DB_PASS: changeme
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USER: esp32
+      MQTT_PASS: changeme
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+
+  # ── Control Panel Frontend ───────────────────────────────────
+  control-panel:
+    build: ./frontend/control-panel
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+
+  # ── Leaderboard Frontend ─────────────────────────────────────
+  leaderboard:
+    build: ./frontend/leaderboard
+    restart: unless-stopped
+    ports:
+      - "5174:80"
+
+volumes:
+  postgres_data:
+  redis_data:

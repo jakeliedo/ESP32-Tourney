@@ -1,0 +1,26 @@
+# ── Firmware (PlatformIO) ────────────────────────────────────
+firmware/.pio/
+firmware/.vscode/
+firmware/include/secrets.h
+
+# ── Backend (Node.js) ────────────────────────────────────────
+backend/node_modules/
+backend/dist/
+backend/.env
+
+# ── Frontend ─────────────────────────────────────────────────
+frontend/control-panel/node_modules/
+frontend/control-panel/dist/
+frontend/leaderboard/node_modules/
+frontend/leaderboard/dist/
+
+# ── Docker / Runtime data ────────────────────────────────────
+mosquitto/data/
+mosquitto/log/
+
+# ── OS & Editor ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/settings.json

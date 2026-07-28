@@ -1,0 +1,78 @@
+================================================================
+ ESP32 GMI Module – Hardware Wiring Guide
+ Based on: SAS 6.0x + W5500 Ethernet + MAX3232 + Optocoupler
+================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 1. W5500 ↔ ESP32 SPI (VSPI Bus)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ W5500 Pin   │ ESP32 GPIO │ Notes
+ ────────────┼────────────┼───────────────────────────────────
+ VCC         │ 3.3V       │ NEVER 5V – destroys W5500
+ GND         │ GND        │ Common ground mandatory
+ MOSI        │ GPIO 23    │ Master Out Slave In
+ MISO        │ GPIO 19    │ Master In Slave Out
+ SCLK        │ GPIO 18    │ SPI clock – max 20MHz, use 8MHz
+ CS / SS     │ GPIO 5     │ Active LOW chip select
+ RST         │ GPIO 26    │ Hardware reset (optional, -1 to skip)
+ INT / IRQ   │ GPIO 35    │ Interrupt-driven RX – mandatory
+
+ PCB Layout Rules:
+   - SPI trace length < 10 cm
+   - No crossing of SPI signals
+   - Differential pairs (TXP/TXN, RXP/RXN) ±0.5mm length match
+   - Keep analog PHY area free of digital signal routing
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 2. RS232 Interface: ESP32 ↔ MAX3232 ↔ Optocoupler ↔ Slot Machine
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [ESP32]          [Optocoupler]      [MAX3232]        [Slot DB9]
+  GPIO 17 (TX) ──► 6N137 input ────► T1IN (TX) ─────► DB9 Pin 2 (RXD)
+  GPIO 16 (RX) ◄── 6N137 output ◄── R1OUT (RX) ◄──── DB9 Pin 3 (TXD)
+                                                        DB9 Pin 5 (GND) [ISOLATED]
+
+ MAX3232 Capacitors (100nF ceramic each):
+   C1: C1+ ↔ C1-
+   C2: C2+ ↔ C2-
+   C3: V+  ↔ GND
+   C4: V-  ↔ GND
+
+ Power domains (CRITICAL – no shared ground):
+   Domain A (Safe):    ESP32 3.3V / GND  ──► LED side of optocoupler
+   Domain B (Isolated): Isolated DC-DC (e.g. Mornsun B0505S-1W)
+                         → powers MAX3232 and phototransistor side
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 3. UART Configuration (SAS 9-bit emulation)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ Baud rate : 19200
+ Data bits : 8
+ Stop bits : 1
+ Parity    : Toggled per-byte at runtime in firmware
+             - Address byte → UART_PARITY_MARK  (bit9 = 1)
+             - Data byte    → UART_PARITY_SPACE (bit9 = 0)
+
+ SAS DB9 pinout (DTE, RS232):
+   Pin 2 : RXD  (Machine transmits → ESP32 receives)
+   Pin 3 : TXD  (ESP32 transmits  → Machine receives)
+   Pin 5 : GND  (ISOLATED – see Domain B above)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 4. Power Supply
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ Component              │ Supply     │ Current (max)
+ ───────────────────────┼────────────┼─────────────────
+ ESP32-WROOM-32         │ 3.3V       │ 500 mA
+ W5500 module           │ 3.3V       │ 150 mA
+ Optocoupler (6N137)    │ 3.3V       │ 10 mA each
+ MAX3232 + charge pump  │ 3.3V       │ 10 mA
+ Isolated DC-DC (slot)  │ 5V in / 5V isolated out │ 200 mA
+
+ Recommended main regulator: AMS1117-3.3 or LM1117 (1A)
+ Decoupling caps near each IC: 100nF ceramic + 10µF electrolytic
+
+================================================================
