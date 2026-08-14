@@ -1,57 +1,133 @@
-// =============================================================
-// DeviceDashboard.tsx – Machine grid with real-time status
-// =============================================================
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { getMachines, Machine } from '../services/api';
-import { io } from 'socket.io-client';
 
-const socket = io('/leaderboard');
+const STATUS_ORDER = ['playing', 'locked', 'handpay', 'online', 'offline'];
+
+function statusPriority(s: string) {
+  const i = STATUS_ORDER.indexOf(s.toLowerCase());
+  return i === -1 ? 99 : i;
+}
 
 export default function DeviceDashboard() {
   const [machines, setMachines] = useState<Machine[]>([]);
 
   useEffect(() => {
-    getMachines().then(r => setMachines(r.data)).catch(console.error);
-
-    socket.on('machine_update', (data: any) => {
-      setMachines(prev => prev.map(m =>
-        m.machine_id === data.machineId
-          ? { ...m, credits: data.credits, status: statusFromState(data.state) }
-          : m,
-      ));
-    });
-
-    return () => { socket.off('machine_update'); };
+    getMachines().then(setMachines);
+    const iv = setInterval(() => getMachines().then(setMachines), 4000);
+    return () => clearInterval(iv);
   }, []);
 
+  const sorted = [...machines].sort(
+    (a, b) => statusPriority(a.status) - statusPriority(b.status),
+  );
+
+  const counts = machines.reduce<Record<string, number>>((acc, m) => {
+    const k = m.status.toLowerCase();
+    acc[k] = (acc[k] ?? 0) + 1;
+    return acc;
+  }, {});
+
   return (
-    <section>
-      <h2 style={{ marginBottom: 12 }}>Device Dashboard</h2>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px,1fr))', gap: 12 }}>
-        {machines.map(m => (
-          <div key={m.machine_id} className="card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <strong>{m.machine_id}</strong>
-              <span className={`badge badge-${m.status}`}>{m.status}</span>
-            </div>
-            <div style={{ marginTop: 8, fontSize: 13, color: '#aaa' }}>
-              <div>Credits: <b style={{ color: '#fff' }}>{m.credits.toLocaleString()}</b></div>
-              <div>Coin-in: {m.coin_in.toLocaleString()}</div>
-              <div>IP: {m.ip_address ?? '—'}</div>
-            </div>
-          </div>
+    <div style={st.root}>
+      {/* Summary bar */}
+      {machines.length > 0 && (
+        <div style={st.summaryBar}>
+          {Object.entries(counts).map(([k, v]) => (
+            <span key={k} className={`badge badge-${k}`} style={{ marginRight: 5 }}>
+              {v} {k}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Machine grid */}
+      <div style={st.grid}>
+        {sorted.length === 0 ? (
+          <div style={st.empty}>No machines online</div>
+        ) : sorted.map(m => (
+          <MachineCard key={m.machine_id} machine={m} />
         ))}
-        {machines.length === 0 && (
-          <p style={{ color: '#666' }}>No machines connected.</p>
-        )}
       </div>
-    </section>
+    </div>
   );
 }
 
-function statusFromState(state: number) {
-  const map: Record<number, Machine['status']> = {
-    0: 'offline', 1: 'online', 2: 'playing', 3: 'locked', 4: 'handpay', 5: 'offline',
+function MachineCard({ machine: m }: { machine: Machine }) {
+  const s = m.status.toLowerCase();
+  const colorMap: Record<string, string> = {
+    online: 'var(--online)',
+    playing: 'var(--playing)',
+    locked: 'var(--locked)',
+    handpay: 'var(--handpay)',
+    offline: 'var(--offline)',
   };
-  return map[state] ?? 'online';
+  const accentColor = colorMap[s] ?? 'var(--offline)';
+
+  return (
+    <div style={{ ...st.card, borderTop: `2px solid ${accentColor}` }}>
+      <div style={st.cardTop}>
+        <span style={st.machineId}>{m.machine_id}</span>
+        <span className={`badge badge-${s}`}>{m.status}</span>
+      </div>
+      <div style={st.credits}>
+        {(m.credits ?? 0).toLocaleString()}
+        <span style={st.creditLabel}>CR</span>
+      </div>
+      <div style={st.stats}>
+        <div style={st.stat}>
+          <span style={st.statLabel}>IN</span>
+          <span style={st.statVal}>{(m.coin_in ?? 0).toLocaleString()}</span>
+        </div>
+        <div style={st.statDivider} />
+        <div style={st.stat}>
+          <span style={st.statLabel}>OUT</span>
+          <span style={st.statVal}>{(m.coin_out ?? 0).toLocaleString()}</span>
+        </div>
+      </div>
+    </div>
+  );
 }
+
+const st: Record<string, React.CSSProperties> = {
+  root: { display: 'flex', flexDirection: 'column', padding: '10px 14px', flex: 1, minHeight: 0 },
+  summaryBar: { marginBottom: 10, display: 'flex', flexWrap: 'wrap', gap: 4 },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))',
+    gap: 8,
+    overflowY: 'auto', flex: 1,
+  },
+  empty: { fontSize: 13, color: 'var(--text-3)', gridColumn: '1/-1', textAlign: 'center', paddingTop: 24 },
+  card: {
+    background: 'var(--surface-2)',
+    borderRadius: 6,
+    padding: '10px 10px 8px',
+    display: 'flex', flexDirection: 'column', gap: 4,
+    border: '1px solid var(--border)',
+  },
+  cardTop: {
+    display: 'flex', alignItems: 'center',
+    justifyContent: 'space-between', marginBottom: 2,
+  },
+  machineId: { fontSize: 12, fontWeight: 700, color: 'var(--text-2)', letterSpacing: '.04em' },
+  credits: {
+    fontFamily: 'Georgia, serif',
+    fontSize: 20, fontWeight: 700,
+    color: 'var(--text)',
+    fontVariantNumeric: 'tabular-nums',
+    lineHeight: 1.1,
+  },
+  creditLabel: {
+    fontFamily: 'system-ui, sans-serif',
+    fontSize: 10, fontWeight: 400,
+    color: 'var(--text-2)', marginLeft: 3,
+  },
+  stats: {
+    display: 'flex', alignItems: 'center', gap: 6,
+    marginTop: 2,
+  },
+  stat: { display: 'flex', flexDirection: 'column', gap: 1, flex: 1 },
+  statLabel: { fontSize: 9, color: 'var(--text-3)', letterSpacing: '.08em', fontWeight: 700 },
+  statVal: { fontSize: 11, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' },
+  statDivider: { width: 1, height: 22, background: 'var(--border)' },
+};

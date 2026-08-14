@@ -1,37 +1,50 @@
 ================================================================
- ESP32 GMI Module – Hardware Wiring Guide
- Based on: SAS 6.0x + W5500 Ethernet + MAX3232 + Optocoupler
+ Waveshare ESP32-S3-ETH – Hardware Wiring Guide
+ Based on: SAS 6.0x + W5500 Ethernet (onboard) + MAX3232 + Optocoupler
 ================================================================
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 1. W5500 ↔ ESP32 SPI (VSPI Bus)
+ 1. W5500 – ONBOARD (không cần module rời)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
- W5500 Pin   │ ESP32 GPIO │ Notes
- ────────────┼────────────┼───────────────────────────────────
- VCC         │ 3.3V       │ NEVER 5V – destroys W5500
- GND         │ GND        │ Common ground mandatory
- MOSI        │ GPIO 23    │ Master Out Slave In
- MISO        │ GPIO 19    │ Master In Slave Out
- SCLK        │ GPIO 18    │ SPI clock – max 20MHz, use 8MHz
- CS / SS     │ GPIO 5     │ Active LOW chip select
- RST         │ GPIO 26    │ Hardware reset (optional, -1 to skip)
- INT / IRQ   │ GPIO 35    │ Interrupt-driven RX – mandatory
+ W5500 được tích hợp sẵn trên PCB Waveshare ESP32-S3-ETH.
+ Kết nối qua SPI2 (FSPI). Traces cố định – KHÔNG đấu dây thêm.
 
- PCB Layout Rules:
-   - SPI trace length < 10 cm
-   - No crossing of SPI signals
-   - Differential pairs (TXP/TXN, RXP/RXN) ±0.5mm length match
-   - Keep analog PHY area free of digital signal routing
+ Chân nội bộ (chỉ để tham khảo firmware):
+ ─────────────────────────────────────────────────────────
+ ETH_MOSI │ GPIO11  │ SPI2 MOSI
+ ETH_MISO │ GPIO12  │ SPI2 MISO
+ ETH_CLK  │ GPIO13  │ SPI2 CLK
+ ETH_CS   │ GPIO14  │ Chip Select (active LOW)
+ ETH_INT  │ GPIO10  │ Interrupt (active LOW)
+ ETH_RST  │ GPIO9   │ Hardware reset
+
+ Kết nối ra ngoài: RJ45 onboard → dây Ethernet LAN trực tiếp.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 2. RS232 Interface: ESP32 ↔ MAX3232 ↔ Optocoupler ↔ Slot Machine
+ 2. GPIO bị chiếm – KHÔNG sử dụng
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  [ESP32]          [Optocoupler]      [MAX3232]        [Slot DB9]
-  GPIO 17 (TX) ──► 6N137 input ────► T1IN (TX) ─────► DB9 Pin 2 (RXD)
-  GPIO 16 (RX) ◄── 6N137 output ◄── R1OUT (RX) ◄──── DB9 Pin 3 (TXD)
-                                                        DB9 Pin 5 (GND) [ISOLATED]
+ GPIO 9–14  : W5500 SPI (onboard)
+ GPIO 33–37 : Octal Flash/PSRAM nội bộ chip ESP32-S3
+ GPIO 19–20 : USB D- / D+ (CDC)
+ GPIO 43    : UART0 TX  (debug Serial monitor)
+ GPIO 44    : UART0 RX  (debug Serial monitor)
+ GPIO 4–7   : SD Card SPI (nếu gắn SD – SD_CS=4, SD_MISO=5,
+                            SD_MOSI=6, SD_CLK=7)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 3. RS232 Interface: ESP32-S3 ↔ MAX3232 ↔ Optocoupler ↔ Slot Machine
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [ESP32-S3-ETH]       [Optocoupler]      [MAX3232]        [Slot DB9]
+  GPIO17 (UART2 TX) ──► 6N137 input ────► T1IN (TX) ─────► DB9 Pin 2 (RXD)
+  GPIO16 (UART2 RX) ◄── 6N137 output ◄── R1OUT (RX) ◄──── DB9 Pin 3 (TXD)
+                                                             DB9 Pin 5 (GND) [ISOLATED]
+
+ Header vị trí trên board:
+   GPIO17 → Header trái, pin 34
+   GPIO16 → Header trái, pin 32
 
  MAX3232 Capacitors (100nF ceramic each):
    C1: C1+ ↔ C1-
@@ -40,39 +53,40 @@
    C4: V-  ↔ GND
 
  Power domains (CRITICAL – no shared ground):
-   Domain A (Safe):    ESP32 3.3V / GND  ──► LED side of optocoupler
-   Domain B (Isolated): Isolated DC-DC (e.g. Mornsun B0505S-1W)
-                         → powers MAX3232 and phototransistor side
+   Domain A (Safe):     ESP32-S3 3.3V / GND  ──► LED side of optocoupler
+   Domain B (Isolated): Mornsun B0505S-1W (5V in / 5V isolated out)
+                        → powers MAX3232 + phototransistor side of 6N137
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 3. UART Configuration (SAS 9-bit emulation)
+ 4. UART Configuration (SAS 9-bit emulation)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
- Baud rate : 19200
- Data bits : 8
- Stop bits : 1
- Parity    : Toggled per-byte at runtime in firmware
-             - Address byte → UART_PARITY_MARK  (bit9 = 1)
-             - Data byte    → UART_PARITY_SPACE (bit9 = 0)
+ UART port  : UART2 (SAS) | UART0 (debug monitor, GPIO43/44 – jangan ganggu)
+ Baud rate  : 19200
+ Data bits  : 8
+ Stop bits  : 1
+ Parity     : Toggled per-byte at runtime in firmware
+              - Address byte → UART_PARITY_MARK  (bit9 = 1)
+              - Data byte    → UART_PARITY_SPACE (bit9 = 0)
 
  SAS DB9 pinout (DTE, RS232):
-   Pin 2 : RXD  (Machine transmits → ESP32 receives)
-   Pin 3 : TXD  (ESP32 transmits  → Machine receives)
-   Pin 5 : GND  (ISOLATED – see Domain B above)
+   Pin 2 : RXD  (Machine transmits → ESP32 receives via GPIO16)
+   Pin 3 : TXD  (ESP32 transmits  → Machine receives via GPIO17)
+   Pin 5 : GND  (ISOLATED – Domain B)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 4. Power Supply
+ 5. Power Supply
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
- Component              │ Supply     │ Current (max)
- ───────────────────────┼────────────┼─────────────────
- ESP32-WROOM-32         │ 3.3V       │ 500 mA
- W5500 module           │ 3.3V       │ 150 mA
- Optocoupler (6N137)    │ 3.3V       │ 10 mA each
- MAX3232 + charge pump  │ 3.3V       │ 10 mA
- Isolated DC-DC (slot)  │ 5V in / 5V isolated out │ 200 mA
+ Component                    │ Supply              │ Current (max)
+ ─────────────────────────────┼─────────────────────┼──────────────
+ Waveshare ESP32-S3-ETH       │ 5V (VSYS / USB)     │ 500 mA
+ W5500 (onboard)              │ tích hợp, 3.3V LDO  │ 150 mA
+ Optocoupler 6N137 (LED side) │ 3.3V (Domain A)     │ 10 mA each
+ MAX3232 + charge pump        │ 3.3V (Domain A)     │ 10 mA
+ MAX3232 RS232 side           │ 5V isolated (Domain B, Mornsun) │ 200 mA
 
- Recommended main regulator: AMS1117-3.3 or LM1117 (1A)
- Decoupling caps near each IC: 100nF ceramic + 10µF electrolytic
+ Decoupling caps near MAX3232: 100nF ceramic + 10µF electrolytic trên 3.3V rail.
+ Board nhận nguồn qua cổng USB-C hoặc pin VSYS (5V).
 
 ================================================================

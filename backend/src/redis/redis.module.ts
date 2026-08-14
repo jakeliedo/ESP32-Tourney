@@ -35,6 +35,11 @@ export class RedisService implements OnModuleInit {
     await this.client.zadd(`tourney:${tournamentId}:scores`, score, machineId);
   }
 
+  async incrementScore(tournamentId: number, machineId: string, delta: number): Promise<number> {
+    const result = await this.client.zincrby(`tourney:${tournamentId}:scores`, delta, machineId);
+    return parseFloat(result);
+  }
+
   async getLeaderboard(tournamentId: number, top = 20): Promise<{machineId: string; score: number}[]> {
     const results = await this.client.zrevrangebyscore(
       `tourney:${tournamentId}:scores`, '+inf', '-inf',
@@ -49,7 +54,8 @@ export class RedisService implements OnModuleInit {
 
   // ── Jackpot pool ────────────────────────────────────────────
   async incrementJackpotPool(amount: number): Promise<number> {
-    return this.client.incrbyfloat('jackpot:pool', amount);
+    const result = await this.client.incrbyfloat('jackpot:pool', amount);
+    return parseFloat(result);
   }
 
   async getJackpotPool(): Promise<number> {

@@ -89,6 +89,10 @@ export class TournamentService {
       started_at: new Date(),
     });
 
+    // Broadcast initial leaderboard (all zeros) so frontend resets immediately
+    const initialRankings = await this.redis.getLeaderboard(id);
+    this.leaderboard.broadcastLeaderboard(id, initialRankings);
+
     // Auto-end after duration
     setTimeout(() => this.end(id), t.duration_seconds * 1000);
     console.log(`Tournament ${id} started with ${t.machine_ids.length} machines`);
@@ -98,9 +102,7 @@ export class TournamentService {
 
   async updateScore(tournamentId: number, machineId: string, winAmount: number): Promise<void> {
     // Increment score in Redis sorted set
-    await this.redis.client?.zincrby(
-      `tourney:${tournamentId}:scores`, winAmount, machineId,
-    ).catch(() => null);
+    await this.redis.incrementScore(tournamentId, machineId, winAmount);
 
     // Push updated leaderboard to all WebSocket clients
     const rankings = await this.redis.getLeaderboard(tournamentId);
@@ -139,6 +141,9 @@ export class TournamentService {
       status: TournamentStatus.FINISHED,
       ended_at: new Date(),
     });
+
+    // Broadcast empty leaderboard so frontend shows "Waiting"
+    this.leaderboard.broadcastLeaderboard(id, []);
     console.log(`Tournament ${id} ended`);
   }
 

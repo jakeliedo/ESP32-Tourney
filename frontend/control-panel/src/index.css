@@ -1,51 +1,99 @@
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:              #07080d;
+  --surface:         #0e1018;
+  --surface-2:       #161921;
+  --surface-hover:   #1d2030;
+  --gold:            #c8a84b;
+  --gold-dim:        #6e5a26;
+  --gold-glow:       rgba(200,168,75,.14);
+  --gold-border:     rgba(200,168,75,.28);
+  --text:            #ede8d8;
+  --text-2:          #8a7e6a;
+  --text-3:          #3f3a2e;
+  --border:          #1e2030;
+  --online:          #3d9e6a;
+  --playing:         #d4831a;
+  --locked:          #2f7ab4;
+  --handpay:         #b03030;
+  --offline:         #3e3e50;
+  --sidebar:         360px;
 }
 
-body {
-  font-family: 'Segoe UI', sans-serif;
-  background: #0f1117;
-  color: #e0e0e0;
-  min-height: 100vh;
-}
-
-h1, h2, h3 { color: #fff; }
-
-.card {
-  background: #1a1d27;
-  border: 1px solid #2a2d3e;
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 16px;
-}
-
-button {
-  cursor: pointer;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 16px;
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
   font-size: 14px;
-  font-weight: 600;
-  transition: opacity 0.2s;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
-button:hover { opacity: 0.85; }
 
-.btn-primary   { background: #4f6ef7; color: #fff; }
-.btn-success   { background: #27ae60; color: #fff; }
-.btn-danger    { background: #e74c3c; color: #fff; }
-.btn-secondary { background: #555; color: #fff; }
+/* ── Scrollbar ─────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
+/* ── Buttons ───────────────────────────────────────── */
+button {
+  cursor: pointer; border: none; border-radius: 4px;
+  padding: 7px 14px; font-size: 13px; font-weight: 600;
+  letter-spacing: .03em; transition: opacity .15s, background .15s;
+}
+button:hover  { opacity: .88; }
+button:active { opacity: .75; }
+
+.btn-gold {
+  background: var(--gold); color: #07080d;
+}
+.btn-start {
+  background: var(--online); color: #fff;
+}
+.btn-end {
+  background: var(--handpay); color: #fff;
+}
+.btn-ghost {
+  background: transparent; color: var(--text-2);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover { background: var(--surface-hover); color: var(--text); }
+
+/* ── Form inputs ───────────────────────────────────── */
+input {
+  width: 100%; padding: 7px 10px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); font-size: 13px;
+  outline: none; transition: border-color .15s;
+}
+input:focus { border-color: var(--gold-dim); }
+input::placeholder { color: var(--text-3); }
+
+/* ── Status badges ─────────────────────────────────── */
 .badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 99px;
-  font-size: 12px;
-  font-weight: 600;
+  display: inline-block; padding: 2px 7px;
+  border-radius: 3px; font-size: 10px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
 }
-.badge-online  { background: #27ae60; color: #fff; }
-.badge-offline { background: #7f8c8d; color: #fff; }
-.badge-playing { background: #f39c12; color: #fff; }
-.badge-locked  { background: #2980b9; color: #fff; }
-.badge-handpay { background: #e74c3c; color: #fff; }
+.badge-online  { background: rgba(61,158,106,.18); color: var(--online); }
+.badge-playing { background: rgba(212,131,26,.18);  color: var(--playing); }
+.badge-locked  { background: rgba(47,122,180,.18);  color: var(--locked); }
+.badge-handpay { background: rgba(176,48,48,.2);    color: var(--handpay); }
+.badge-offline { background: rgba(62,62,80,.3);     color: var(--text-2); }
+.badge-active  { background: rgba(61,158,106,.18);  color: var(--online); }
+.badge-scheduled { background: rgba(200,168,75,.12); color: var(--gold); }
+.badge-finished  { background: rgba(62,62,80,.3);    color: var(--text-2); }
+
+/* ── Score flash animation ─────────────────────────── */
+@keyframes scoreFlash {
+  0%,100% { color: var(--gold); }
+  50%      { color: #f0d98a; }
+}
+
+/* ── Jackpot shimmer ──────────────────────────────── */
+@keyframes shimmer {
+  0%   { opacity: 1; }
+  50%  { opacity: .65; }
+  100% { opacity: 1; }
+}

@@ -11,6 +11,7 @@ import * as mqtt from 'mqtt';
 import { RedisService } from '../redis/redis.module';
 import { MachineEntity, MachineStatus } from '../database/entities/machine.entity';
 import { TransactionEntity, TransactionStatus } from '../database/entities/transaction.entity';
+import { TournamentEntity, TournamentStatus } from '../database/entities/tournament.entity';
 import { LeaderboardGateway } from './leaderboard.gateway';
 
 interface TelemetryPayload {
@@ -33,6 +34,7 @@ interface ServerCommand {
 @Injectable()
 export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
   private client: mqtt.MqttClient;
+  private lastCoinIn = new Map<string, number>();
 
   constructor(
     private cfg: ConfigService,
@@ -42,6 +44,8 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
     private machines: Repository<MachineEntity>,
     @InjectRepository(TransactionEntity)
     private transactions: Repository<TransactionEntity>,
+    @InjectRepository(TournamentEntity)
+    private tournaments: Repository<TournamentEntity>,
   ) {}
 
   onModuleInit() {
@@ -138,8 +142,27 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    // 4. Push leaderboard update via WebSocket
+    // 4. Push machine update via WebSocket
     this.leaderboard.broadcastMachineUpdate(machineId, data);
+
+    // 5. Update tournament score if machine is in an active tournament
+    const prevCoinIn = this.lastCoinIn.get(machineId) ?? data.coin_in;
+    const delta = data.coin_in - prevCoinIn;
+    this.lastCoinIn.set(machineId, data.coin_in);
+
+    if (delta < 0) {
+      // Simulator restarted from 0 — reset tracking without scoring
+      this.lastCoinIn.set(machineId, data.coin_in);
+    } else if (delta > 0) {
+      const activeTourney = await this.tournaments.findOne({
+        where: { status: TournamentStatus.ACTIVE },
+      });
+      if (activeTourney && activeTourney.machine_ids.includes(machineId)) {
+        await this.redis.incrementScore(activeTourney.id, machineId, delta);
+        const rankings = await this.redis.getLeaderboard(activeTourney.id);
+        this.leaderboard.broadcastLeaderboard(activeTourney.id, rankings);
+      }
+    }
   }
 
   // ── Send command to a specific machine ───────────────────

@@ -10,6 +10,6 @@ import { LeaderboardGateway } from './leaderboard.gateway';
 @Module({
   imports: [DatabaseModule, RedisModule],
   providers: [MqttGatewayService, LeaderboardGateway],
-  exports: [MqttGatewayService],
+  exports: [MqttGatewayService, LeaderboardGateway],
 })
 export class DeviceGatewayModule {}

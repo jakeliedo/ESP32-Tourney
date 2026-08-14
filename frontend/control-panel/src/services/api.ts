@@ -1,6 +1,3 @@
-// =============================================================
-// api.ts – Axios API client for backend REST endpoints
-// =============================================================
 import axios from 'axios';
 
 const api = axios.create({ baseURL: '/api' });
@@ -32,17 +29,25 @@ export interface LeaderboardEntry {
 }
 
 // Machines
-export const getMachines = ()                     => api.get<Machine[]>('/machines');
+export const getMachines = (): Promise<Machine[]> =>
+  api.get<Machine[]>('/machines').then(r => r.data);
 
 // Tournaments
-export const getTournaments = ()                  => api.get<Tournament[]>('/tournaments');
-export const getTournament  = (id: number)        => api.get<Tournament>(`/tournaments/${id}`);
-export const createTournament = (data: Partial<Tournament>) => api.post<Tournament>('/tournaments', data);
-export const startTournament  = (id: number)      => api.post(`/tournaments/${id}/start`);
-export const endTournament    = (id: number)      => api.post(`/tournaments/${id}/end`);
-export const getLeaderboard   = (id: number)      => api.get<LeaderboardEntry[]>(`/tournaments/${id}/leaderboard`);
+export const getTournaments = (): Promise<Tournament[]> =>
+  api.get<Tournament[]>('/tournaments').then(r => r.data);
+export const getTournament = (id: number): Promise<Tournament> =>
+  api.get<Tournament>(`/tournaments/${id}`).then(r => r.data);
+export const createTournament = (data: Partial<Tournament>): Promise<Tournament> =>
+  api.post<Tournament>('/tournaments', data).then(r => r.data);
+export const startTournament = (id: number): Promise<void> =>
+  api.post(`/tournaments/${id}/start`).then(() => undefined);
+export const endTournament = (id: number): Promise<void> =>
+  api.post(`/tournaments/${id}/end`).then(() => undefined);
+export const getLeaderboard = (id: number): Promise<LeaderboardEntry[]> =>
+  api.get<LeaderboardEntry[]>(`/tournaments/${id}/leaderboard`).then(r => r.data);
 
 // Jackpot
-export const getJackpotPool = () => api.get<{ pool_amount: number }>('/jackpot/pool');
+export const getJackpotPool = (): Promise<{ pool_amount: number }> =>
+  api.get<{ pool_amount: number }>('/jackpot/pool').then(r => r.data);
 
 export default api;
