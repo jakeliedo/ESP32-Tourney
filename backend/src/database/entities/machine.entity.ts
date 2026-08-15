@@ -18,6 +18,9 @@ export class MachineEntity {
   @PrimaryColumn({ type: 'varchar', length: 50 })
   machine_id: string;   // e.g. "GMI-Machine-01"
 
+  @Column({ type: 'varchar', length: 100, nullable: true, default: '' })
+  display_name: string;
+
   @Column({ type: 'varchar', length: 15, nullable: true })
   ip_address: string;
 

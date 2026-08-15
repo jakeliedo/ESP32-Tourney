@@ -1,99 +1,195 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:              #07080d;
-  --surface:         #0e1018;
-  --surface-2:       #161921;
-  --surface-hover:   #1d2030;
-  --gold:            #c8a84b;
-  --gold-dim:        #6e5a26;
-  --gold-glow:       rgba(200,168,75,.14);
-  --gold-border:     rgba(200,168,75,.28);
-  --text:            #ede8d8;
-  --text-2:          #8a7e6a;
-  --text-3:          #3f3a2e;
-  --border:          #1e2030;
-  --online:          #3d9e6a;
-  --playing:         #d4831a;
-  --locked:          #2f7ab4;
-  --handpay:         #b03030;
-  --offline:         #3e3e50;
-  --sidebar:         360px;
+  --bg:           #07080d;
+  --surface:      #0e1018;
+  --surface-2:    #131520;
+  --surface-3:    #191c28;
+  --gold:         #c8a84b;
+  --gold-dim:     #6e5a26;
+  --gold-border:  rgba(200,168,75,.25);
+  --text:         #ddd8c8;
+  --text-2:       #7a7060;
+  --text-3:       #3a3628;
+  --border:       #1c1f2e;
+  --border-2:     #242840;
+  --online:       #2d9e5f;
+  --offline:      #3e3e50;
+  --locked:       #2f7ab4;
+  --handpay:      #b03030;
 }
 
 html, body, #root {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-  font-size: 14px;
+  font-family: 'Consolas', 'Menlo', 'Courier New', monospace;
+  font-size: 13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
-/* ── Scrollbar ─────────────────────────────────────── */
+/* ── Scrollbar ───────────────────────── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 2px; }
 
-/* ── Buttons ───────────────────────────────────────── */
+/* ── Base button reset ───────────────── */
 button {
-  cursor: pointer; border: none; border-radius: 4px;
-  padding: 7px 14px; font-size: 13px; font-weight: 600;
-  letter-spacing: .03em; transition: opacity .15s, background .15s;
+  cursor: pointer; border: 1px solid transparent;
+  border-radius: 3px; padding: 6px 12px;
+  font-family: inherit; font-size: 12px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
+  transition: opacity .12s, box-shadow .12s, background .12s;
+  outline: none;
 }
-button:hover  { opacity: .88; }
-button:active { opacity: .75; }
+button:hover  { opacity: .85; }
+button:active { opacity: .65; }
+button:disabled { opacity: .35; cursor: not-allowed; }
+
+/* ── Button variants ─────────────────── */
+.btn-neutral {
+  background: var(--surface-3);
+  color: var(--text-2);
+  border-color: var(--border-2);
+}
+.btn-neutral:hover { color: var(--text); border-color: var(--gold-dim); }
 
 .btn-gold {
-  background: var(--gold); color: #07080d;
+  background: transparent;
+  color: var(--gold);
+  border-color: var(--gold-dim);
 }
-.btn-start {
-  background: var(--online); color: #fff;
-}
-.btn-end {
-  background: var(--handpay); color: #fff;
-}
-.btn-ghost {
-  background: transparent; color: var(--text-2);
-  border: 1px solid var(--border);
-}
-.btn-ghost:hover { background: var(--surface-hover); color: var(--text); }
+.btn-gold:hover { background: var(--gold-border); }
 
-/* ── Form inputs ───────────────────────────────────── */
-input {
-  width: 100%; padding: 7px 10px;
-  background: var(--bg); border: 1px solid var(--border);
-  border-radius: 4px; color: var(--text); font-size: 13px;
-  outline: none; transition: border-color .15s;
+.btn-danger {
+  background: rgba(176,48,48,.15);
+  color: #e06060;
+  border-color: rgba(176,48,48,.4);
+}
+
+.btn-start {
+  width: 100%;
+  padding: 16px;
+  font-size: 15px; letter-spacing: .18em;
+  background: #0b2212;
+  color: #3aaa60;
+  border: 1px solid #1a5530;
+  border-radius: 4px;
+}
+.btn-start:hover { background: #0e2e18; }
+.btn-start.running {
+  background: #0d3319;
+  color: #50e080;
+  border-color: #2d8a4a;
+  box-shadow: 0 0 18px rgba(50,180,90,.28), inset 0 0 8px rgba(50,180,90,.08);
+}
+
+.btn-stop {
+  padding: 8px 22px;
+  font-size: 12px; letter-spacing: .14em;
+  background: rgba(160,30,30,.12);
+  color: #c05050;
+  border: 1px solid rgba(160,30,30,.35);
+  border-radius: 3px;
+}
+.btn-stop:hover { background: rgba(160,30,30,.22); }
+.btn-stop.active {
+  color: #ff6060;
+  border-color: rgba(200,50,50,.65);
+  box-shadow: 0 0 10px rgba(200,50,50,.3);
+}
+
+.btn-buyin {
+  background: rgba(200,168,75,.1);
+  color: var(--gold);
+  border-color: var(--gold-dim);
+  padding: 4px 10px;
+  font-size: 11px;
+}
+.btn-buyin:hover { background: rgba(200,168,75,.2); }
+
+.btn-enable {
+  background: rgba(45,158,95,.12);
+  color: #3aaa60;
+  border-color: rgba(45,158,95,.35);
+  padding: 4px 10px;
+  font-size: 11px;
+}
+.btn-disable {
+  background: rgba(176,48,48,.1);
+  color: #c05050;
+  border-color: rgba(176,48,48,.35);
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+/* ── Inputs ──────────────────────────── */
+input[type="number"], input[type="text"] {
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  outline: none;
+  transition: border-color .12s;
+  width: 100%;
 }
 input:focus { border-color: var(--gold-dim); }
 input::placeholder { color: var(--text-3); }
 
-/* ── Status badges ─────────────────────────────────── */
-.badge {
-  display: inline-block; padding: 2px 7px;
-  border-radius: 3px; font-size: 10px; font-weight: 700;
-  letter-spacing: .06em; text-transform: uppercase;
+/* ── Status dot ──────────────────────── */
+.dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
 }
-.badge-online  { background: rgba(61,158,106,.18); color: var(--online); }
-.badge-playing { background: rgba(212,131,26,.18);  color: var(--playing); }
-.badge-locked  { background: rgba(47,122,180,.18);  color: var(--locked); }
-.badge-handpay { background: rgba(176,48,48,.2);    color: var(--handpay); }
-.badge-offline { background: rgba(62,62,80,.3);     color: var(--text-2); }
-.badge-active  { background: rgba(61,158,106,.18);  color: var(--online); }
-.badge-scheduled { background: rgba(200,168,75,.12); color: var(--gold); }
-.badge-finished  { background: rgba(62,62,80,.3);    color: var(--text-2); }
+.dot-online  { background: var(--online); box-shadow: 0 0 5px var(--online); }
+.dot-offline { background: var(--offline); }
+.dot-locked  { background: var(--locked); }
+.dot-handpay { background: var(--handpay); }
 
-/* ── Score flash animation ─────────────────────────── */
-@keyframes scoreFlash {
-  0%,100% { color: var(--gold); }
-  50%      { color: #f0d98a; }
+/* ── Section label ───────────────────── */
+.section-label {
+  font-size: 9px; font-weight: 700;
+  letter-spacing: .18em; color: var(--text-3);
+  text-transform: uppercase;
+  margin-bottom: 10px;
 }
 
-/* ── Jackpot shimmer ──────────────────────────────── */
-@keyframes shimmer {
-  0%   { opacity: 1; }
-  50%  { opacity: .65; }
-  100% { opacity: 1; }
+/* ── Machine row ─────────────────────── */
+.machine-row {
+  display: grid;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  grid-template-columns: 52px 120px 70px 72px 72px auto;
+  transition: background .1s;
+}
+.machine-row:hover { background: var(--surface-3); }
+.machine-row:last-child { border-bottom: none; }
+
+.machine-id-cell { color: var(--gold); font-weight: 700; letter-spacing: .04em; }
+.machine-ip-cell { color: var(--text-2); }
+.machine-credits-cell { color: var(--text); font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+.machine-status-cell {}
+.machine-enabled-cell { color: var(--online); font-weight: 700; }
+.machine-enabled-cell.disabled { color: var(--text-3); }
+.machine-actions-cell { display: flex; align-items: center; gap: 5px; justify-content: flex-end; }
+.input-name {
+  width: 180px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.input-buyin {
+  width: 64px;
+  font-size: 11px;
+  padding: 3px 6px;
+  text-align: right;
 }

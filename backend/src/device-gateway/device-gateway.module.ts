@@ -6,10 +6,12 @@ import { MqttGatewayService } from './mqtt-gateway.service';
 import { DatabaseModule } from '../database/database.module';
 import { RedisModule } from '../redis/redis.module';
 import { LeaderboardGateway } from './leaderboard.gateway';
+import { DeviceController } from './device.controller';
 
 @Module({
   imports: [DatabaseModule, RedisModule],
   providers: [MqttGatewayService, LeaderboardGateway],
+  controllers: [DeviceController],
   exports: [MqttGatewayService, LeaderboardGateway],
 })
 export class DeviceGatewayModule {}
