@@ -65,11 +65,15 @@ export default function Leaderboard() {
           } else {
             endTimeRef.current = null;
             setTimeLeft(null);
+            // No active tournament → switch leaderboard back to live-credit mode
+            setRankings([]);
+            tournamentMachineIds.current.clear();
+            setTournId(null);
           }
         })
         .catch(() => {});
     fetchT();
-    const iv = setInterval(fetchT, 5000);
+    const iv = setInterval(fetchT, 2000);
     return () => clearInterval(iv);
   }, []);
 
