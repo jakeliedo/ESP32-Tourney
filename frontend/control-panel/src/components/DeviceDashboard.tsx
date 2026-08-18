@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { getMachines, Machine } from '../services/api';
 
-const STATUS_ORDER = ['playing', 'locked', 'handpay', 'online', 'offline'];
+const STATUS_ORDER = ['playing', 'locked', 'handpay', 'disabled', 'online', 'offline'];
 
 function statusPriority(s: string) {
   const i = STATUS_ORDER.indexOf(s.toLowerCase());
@@ -55,11 +55,12 @@ export default function DeviceDashboard() {
 function MachineCard({ machine: m }: { machine: Machine }) {
   const s = m.status.toLowerCase();
   const colorMap: Record<string, string> = {
-    online: 'var(--online)',
-    playing: 'var(--playing)',
-    locked: 'var(--locked)',
-    handpay: 'var(--handpay)',
-    offline: 'var(--offline)',
+    online:   'var(--online)',
+    playing:  'var(--playing)',
+    locked:   'var(--locked)',
+    handpay:  'var(--handpay)',
+    disabled: 'var(--disabled)',
+    offline:  'var(--offline)',
   };
   const accentColor = colorMap[s] ?? 'var(--offline)';
 

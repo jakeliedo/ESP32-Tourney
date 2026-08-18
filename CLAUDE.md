@@ -36,11 +36,14 @@ React Frontends
 |---|---|---|
 | Firmware (main, SAS, ETH, MQTT, Watchdog) | ✅ Hoàn chỉnh | Tất cả module có implementation thực sự |
 | Backend entities, modules, gateway | ✅ Hoàn chỉnh | |
-| Backend tournament.service.ts | ✅ Đã fix | Bug `private client` access → thay bằng `incrementScore()` |
-| Backend machine controller | ✅ Đã thêm | `GET /api/machines` — frontend cần route này |
+| Backend tournament (multi-round + history) | ✅ Hoàn chỉnh | `session_id`, `session_name`, `round_number`, `total_rounds`; cancel/end tách biệt |
+| Backend player management | ✅ Hoàn chỉnh | `PlayerEntity`, `PlayerModule`, CRUD `/api/players` |
+| Backend round results | ✅ Hoàn chỉnh | `RoundResultEntity` — chỉ lưu khi timer hết tự nhiên (không lưu khi STOP thủ công) |
+| Backend machine controller | ✅ Hoàn chỉnh | `GET /api/machines` + PATCH, commands |
 | Backend jackpot | ✅ Hoạt động | |
-| Frontend control-panel (unified UI) | ✅ Redesigned | Split layout: LiveLeaderboard (left) + Sidebar tabs (right), casino dark-gold theme |
-| Frontend leaderboard (:5174) | ✅ Hoàn chỉnh | Màn hình 4K độc lập, vẫn giữ nguyên |
+| Scoring logic | ✅ Credits-based | Score = credits hiện tại của máy (không phải coin_in delta) |
+| Frontend control-panel | ✅ Hoàn chỉnh | Tabbed panel: Machines / History / Players; multi-round session; session naming |
+| Frontend leaderboard (:5174) | ✅ Hoàn chỉnh | Xóa máy offline khỏi bảng; bảng trống khi không có máy kết nối |
 | TypeORM migrations | ⚠️ Chưa có | Dev dùng `synchronize: true`, production cần tạo migrations |
 
 ---
@@ -55,8 +58,8 @@ ESP32-Tourney/
 │   └── src/
 │       ├── main.cpp            # Boot sequence + task spawn
 │       ├── sas/                # SAS protocol layer
-│       │   ├── sas_polling.h/cpp   # FreeRTOS task, state machine, 40ms cycle
-│       │   ├── sas_commands.h/cpp  # AFT 72/74, lock/unlock, CRC-16 build
+│       │   ├── sas_polling.h/cpp   # FreeRTOS task, state machine, 40ms cycle; CMD_DISABLE/ENABLE dispatch
+│       │   ├── sas_commands.h/cpp  # AFT 0x72/0x74; LP simple: 0x01 Shutdown, 0x02 Startup, 0x06/0x07 Bill
 │       │   └── crc16.h/cpp         # CRC-16/ARC implementation
 │       ├── network/
 │       │   ├── eth_manager.h/cpp   # W5500 DHCP init, IP getter
@@ -70,35 +73,40 @@ ESP32-Tourney/
 │       ├── main.ts
 │       ├── database/
 │       │   ├── database.module.ts
-│       │   ├── machine.controller.ts   # GET /api/machines
+│       │   ├── machine.controller.ts   # GET /api/machines, PATCH, commands
 │       │   └── entities/
 │       │       ├── machine.entity.ts       # MachineStatus enum, credits snapshot
 │       │       ├── transaction.entity.ts   # TransactionType, TransactionStatus, aft_status_code
-│       │       └── tournament.entity.ts    # TournamentStatus, machine_ids[], duration_seconds
+│       │       ├── tournament.entity.ts    # TournamentStatus (SCHEDULED/ACTIVE/FINISHED/CANCELLED) + session_id/name
+│       │       ├── player.entity.ts        # membership_number (PK), display_name
+│       │       └── round_result.entity.ts  # standings snapshot per round (rank, score, advanced)
 │       ├── device-gateway/
-│       │   ├── mqtt-gateway.service.ts # MQTT connect/subscribe/publish, telemetry router
-│       │   └── leaderboard.gateway.ts  # Socket.IO gateway → broadcastLeaderboard/JackpotHit
+│       │   ├── mqtt-gateway.service.ts # MQTT connect/subscribe/publish, telemetry router; ZREM khi máy offline
+│       │   └── leaderboard.gateway.ts  # broadcastLeaderboard(id, rankings, roundNumber, totalRounds, endsAt)
 │       ├── tournament/
-│       │   ├── tournament.service.ts   # Phase 1 pump, Phase 2 score, Phase 3 end
-│       │   └── tournament.controller.ts
+│       │   ├── tournament.service.ts   # end()/cancel() atomic flip; getHistory() → SessionDto[]
+│       │   └── tournament.controller.ts  # POST /:id/cancel (mới)
+│       ├── player/
+│       │   ├── player.module.ts
+│       │   └── player.controller.ts    # CRUD /api/players (upsert by membership_number)
 │       ├── jackpot/
 │       │   ├── jackpot.service.ts      # PRNG hit_value, coin-in contribution, AFT cashable
 │       │   └── jackpot.controller.ts
 │       └── redis/
-│           └── redis.module.ts         # RedisService: machine state, jackpot pool, leaderboard + incrementScore()
+│           └── redis.module.ts         # RedisService: machine state, jackpot pool, leaderboard + removeFromLeaderboard()
 ├── frontend/
 │   ├── control-panel/src/
-│   │   ├── App.tsx                     # Split layout: leaderboard flex-1 left + 360px sidebar right
-│   │   ├── index.css                   # Casino token system (dark gold palette, badges, buttons)
+│   │   ├── App.tsx                     # All-in-one: Machines/History/Players; session naming; cancel vs end flow
+│   │   ├── index.css                   # Casino token system; spinners ẩn toàn cục, chỉ bật cho rounds input
 │   │   ├── components/
-│   │   │   ├── LiveLeaderboard.tsx     # Socket.IO /leaderboard, score flash, top-3 medals, jackpot overlay
-│   │   │   ├── TournamentManager.tsx   # Compact sidebar: active tourney, create form, history
-│   │   │   └── DeviceDashboard.tsx     # Compact card grid: status-sorted, credits/coin stats
-│   │   └── services/api.ts             # Axios client, unwraps .data — returns typed arrays directly
+│   │   │   ├── LiveLeaderboard.tsx     # (unused — logic in App.tsx)
+│   │   │   ├── TournamentManager.tsx   # (unused — logic in App.tsx)
+│   │   │   └── DeviceDashboard.tsx     # (unused — logic in App.tsx)
+│   │   └── services/api.ts             # Axios; Tournament/SessionDto/RoundDto types; cancelTournament()
 │   └── leaderboard/src/
-│       ├── components/Leaderboard.tsx
-│       └── hooks/useWebSocket.ts
-├── sim_esp32.py                        # Competitive multi-machine simulator (auto-fetches active tourney IDs)
+│       ├── components/Leaderboard.tsx  # tournamentRunning logic; sourceRows; ZREM offline machines
+│       └── hooks/useWebSocket.ts       # transports: websocket + polling fallback
+├── sim_esp32.py                        # Simulator: chỉ trừ credits khi tournament ACTIVE
 ├── mosquitto/config/mosquitto.conf
 ├── docker-compose.yml
 └── hardware/wiring_guide.txt
@@ -113,21 +121,43 @@ ESP32-Tourney/
 | `casino/machine/{id}/telemetry` | ESP32 → Backend | JSON: exception, credits, coin_in, coin_out, state, txn_id, aft_status |
 | `casino/machine/{id}/events` | ESP32 → Backend | SAS exception events |
 | `casino/machine/{id}/status` | ESP32 → Backend | `"online"` / `"offline"` (LWT) |
-| `casino/machine/{id}/commands` | Backend → ESP32 | JSON: type (AFT_PUMP/AFT_WITHDRAW/LOCK/UNLOCK), amount, txn_id |
+| `casino/machine/{id}/commands` | Backend → ESP32 | JSON: type (AFT_PUMP/AFT_WITHDRAW/LOCK/UNLOCK/DISABLE/ENABLE), amount, txn_id |
 
 ---
 
 ## Luồng nghiệp vụ chính
 
 ### Tournament (3 pha)
-1. **Start** – `LOCK` → `AFT_PUMP` (restricted credits) → init Redis sorted-set score = 0
-2. **Active** – mỗi coin-in event → `updateScore()` → `zincrby` trên Redis → WebSocket broadcast
-3. **End** (tự động sau `duration_seconds`) – `AFT_WITHDRAW` → `UNLOCK` → status = FINISHED
+1. **Start** – nhấn **START TOURNAMENT** → tự động ENABLE tất cả máy không offline → init Redis sorted-set score = credits hiện tại từ DB → broadcast leaderboard
+2. **Active** – mỗi khi credits thay đổi (telemetry) → `updateScore()` → `zadd` trên Redis → WebSocket broadcast kèm `roundNumber`/`totalRounds`
+3. **End — hai trường hợp:**
+   - **Timer hết tự nhiên** → `end()` → DISABLE tất cả máy → lưu `RoundResultEntity` → broadcast final → `roundsCompleted++` → vào History
+   - **STOP thủ công** → `cancel()` → DISABLE tất cả máy → **không** lưu kết quả → **không** tính round → session giữ nguyên, user retry cùng round
+
+### Vòng đời Tournament status
+```
+SCHEDULED → ACTIVE → FINISHED   (timer hết, lưu kết quả)
+                   → CANCELLED  (STOP thủ công, không lưu)
+```
+- `getHistory()` chỉ trả về FINISHED. CANCELLED không xuất hiện trong History.
+- `end()` và `cancel()` đều dùng atomic `UPDATE WHERE status=ACTIVE` để tránh race condition giữa timer server-side và lệnh STOP.
+
+### Multi-Round Session
+- Mỗi round = một `TournamentEntity` riêng, liên kết qua `session_id` (UUID tạo client-side)
+- `session_name` được đặt khi bắt đầu round 1, copy sang các round tiếp; input bị disabled khi session đang chạy
+- Sau khi round kết thúc tự nhiên: nếu `roundsCompleted < totalRounds` → hiện nút **START ROUND N** + **NEW SESSION**
+- Sau khi STOP thủ công: session giữ nguyên, nút START hiện lại cùng số round để retry
+- Score display: `$XX.XX` = credits / 100 (credits lưu DB là integer, e.g. 10000 = $100.00)
 
 ### Mystery Jackpot
 - Mỗi coin-in đóng góp `JACKPOT_CONTRIBUTION_RATE`% vào pool (Redis key)
 - Khi `pool >= hit_value` (PRNG bí mật) → kích hoạt jackpot
 - Gửi `AFT_PUMP` (cashable) đến máy thắng → broadcast jackpot hit → reset pool và sinh `hit_value` mới
+
+### Leaderboard — hành vi offline
+- Khi máy mất kết nối → backend gọi `ZREM` trên Redis sorted-set → broadcast lại leaderboard không có máy đó
+- Nếu không có máy nào kết nối → `sourceRows = []` → bảng trống hoàn toàn
+- `tournamentRunning` (không phải `isInTournament`) kiểm soát toàn bộ display logic
 
 ### AFT Transaction Lifecycle
 ```
@@ -144,9 +174,11 @@ Backend cập nhật DB status = SUCCESS | FAILED (aft_status_code)
 
 - **SAS polling ≤ 40 ms** – đây là yêu cầu cứng của SAS 6.0x. Task SAS chạy Core 1, priority cao nhất.
 - **9-bit UART cho SAS** – byte địa chỉ dùng parity bit = 1 (address mark), byte dữ liệu parity = 0. ESP-IDF không native hỗ trợ → xem `sas_polling.cpp` để biết cách emulate.
+- **DISABLE ≠ LOCK** – LOCK = LP 0x01 Shutdown (tournament, cho cashout); DISABLE = LP 0x01 + delay 40ms + LP 0x07 Disable Bill (admin, chặn hoàn toàn). Firmware dispatch theo `CMD_DISABLE=4` / `CMD_ENABLE=5`, tách biệt `CMD_LOCK=2` / `CMD_UNLOCK=3`.
 - **NVS persistence** – watchdog khởi động lại phải recover `pending_txn_id` từ NVS trước khi tiếp tục poll. Không được mất transaction đang chờ.
 - **TypeORM `synchronize: true` chỉ ở dev** – production dùng migrations. `app.module.ts` đã guard theo `NODE_ENV`.
 - **Jackpot hit_value là bí mật** – không log ra ngoài. `generateNewHitValue()` chỉ in "set (internal)".
+- **`end()` / `cancel()` atomic** – dùng `UPDATE WHERE status=ACTIVE`; nếu `affected=0` thì return ngay. Không bao giờ lưu `RoundResultEntity` hai lần.
 
 ---
 
@@ -190,7 +222,8 @@ python sim_esp32.py
 Simulator:
 - Gọi `GET /api/tournaments` → tìm tournament status=active → lấy `machine_ids[]`
 - Publish telemetry cho tất cả machine với tốc độ coin_in ngẫu nhiên (weighted: chậm thắng nhanh)
-- Nếu không có active tournament: fallback dùng IDs ["1","2","3"]
+- **Chỉ trừ credits khi tournament ACTIVE** — ENABLE đơn thuần không kích hoạt trừ credits
+- Nếu không có active tournament: fallback dùng IDs ["MC01","MC02","MC03"]
 - Dừng: Ctrl+C
 
 ### Firmware (PlatformIO CLI hoặc VS Code)
@@ -208,32 +241,97 @@ pio run -e esp32s3-eth               # build env cụ thể
 
 ## UI Control Panel — Thiết kế thống nhất
 
-Control panel (:5173) đã được redesign thành **một trang duy nhất**, gộp leaderboard và dashboard:
+Control panel (:5173) là **một trang duy nhất** (`App.tsx`), layout dọc:
 
 ```
-┌─────────────────────────────┬──────────────────────┐
-│  LEADERBOARD (flex: 1)      │  SIDEBAR (360px)      │
-│                             │  ┌─ Tournament tab ──┐ │
-│  GMI TOURNAMENT        LIVE │  │ Active tourney    │ │
-│  ──────────────────────     │  │ Create form       │ │
-│  ① Machine-A    12,840 pts  │  │ History list      │ │
-│  ② Machine-B     9,210 pts  │  └───────────────────┘ │
-│  #3 Machine-C    7,500 pts  │  ┌─ Devices tab ────┐ │
-│  ...                        │  │ Status-sorted     │ │
-│                             │  │ card grid         │ │
-│  [JACKPOT OVERLAY]          │  └───────────────────┘ │
-└─────────────────────────────┴──────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  Header: ◈ SLOT TOURNAMENT                  v1.0.0  │
+├─────────────────────────────────────────────────────┤
+│  Initial Settings (4 cột + Session Name full-width) │
+│    Start Credit | Time MM:SS | Rounds | JP Initial  │
+│    Session Name: ________________________           │
+├─────────────────────────────────────────────────────┤
+│  Controls:                                          │
+│    [Refresh] [Enable All] [Disable All] [AFT IN/OUT]│
+│    SESSION: Round 2/3  [FINAL ROUND]                │
+│    [▶ START ROUND 2]  [NEW SESSION]                 │
+│    TIME LEFT  04:32              [STOP]             │
+├─────────────────────────────────────────────────────┤
+│  Tabbed Panel:  [Machines (3)] [History] [Players]  │
+│  ─ Machines: 1 dòng/máy: ID · Name · IP · Status   │
+│              · $XX.XX · ENABLED/DISABLED · [BUY-IN] │
+│  ─ History: grid 4 cột, tối đa 8 thẻ gần nhất      │
+│             Mỗi thẻ: tên session (màu theo session) │
+│             Round x/y · D/M · H:M:S                │
+│             🥇🥈🥉 rankings                         │
+│  ─ Players: membership# + display_name, CRUD        │
+├─────────────────────────────────────────────────────┤
+│  Footer: version | LB status | machines | round N/∞ │
+└─────────────────────────────────────────────────────┘
 ```
 
 **Design tokens** (index.css):
 - Background: `#07080d`, Surface: `#0e1018 / #161921`
 - Gold: `#c8a84b`, Text: `#ede8d8`
+- Number spinners: ẩn toàn cục, chỉ hiện cho rounds input (`.with-spin`)
 - Score/rank typography: Georgia serif + `tabular-nums`
 
+**History tab — chi tiết:**
+- 8 round cards gần nhất (sort theo `endedAt` DESC, flatten qua tất cả sessions)
+- Grid 4 cột, mỗi thẻ `alignSelf: start` (không kéo cao bằng nhau)
+- Màu thẻ: hash `session_id` → index vào `SESSION_COLORS[10]` — deterministic, reload vẫn cùng màu
+- Header 2 dòng: (1) tên session màu accent, (2) `Round N/M · D/M · HH:mm:ss`
+- Ranks: 🥇🥈🥉 cho top 3, `#N` text màu `var(--text-3)` cho phần còn lại
+- Chỉ xuất hiện khi round kết thúc **tự nhiên** (timer hết); STOP thủ công không tạo thẻ
+
 **Luồng dữ liệu UI:**
-- `LiveLeaderboard` → Socket.IO `/leaderboard` namespace → event `leaderboard_update`
-- `DeviceDashboard` → polling `GET /api/machines` mỗi 4 giây
-- `TournamentManager` → REST API (create/start/end)
+- Machine list → polling `GET /api/machines` mỗi 2 giây; `enabledSet` sync từ DB status (offline/disabled → remove)
+- START TOURNAMENT → auto-enable tất cả máy không offline, không cần bấm Enable All trước
+- Tournament → REST API (create/start/end/cancel)
+- History tab → `GET /api/tournaments/history` trả `SessionDto[]`, mở tab thì load
+- Players tab → `GET /api/players`, POST upsert, DELETE xóa
+
+**Leaderboard (:5174) — hành vi:**
+- `tournamentRunning=true` → hiện rankings từ Redis
+- `tournamentRunning=false` + có máy → hiện credits thực tế (pre-tourney view)
+- Không có máy kết nối → bảng trống hoàn toàn (kể cả khi có stale data trong state)
+- Máy offline trong lúc tournament → bị ZREM khỏi leaderboard ngay lập tức
+
+---
+
+## API Endpoints (Backend :3000)
+
+| Method | Path | Mô tả |
+|---|---|---|
+| GET | `/api/machines` | Danh sách máy |
+| PATCH | `/api/machines/:id` | Cập nhật display_name |
+| POST | `/api/machines/:id/command` | Gửi lệnh (ENABLE/DISABLE/AFT_PUMP...) |
+| POST | `/api/machines/aft-in-all` | AFT IN tất cả máy enabled |
+| POST | `/api/machines/aft-out-all` | AFT OUT tất cả máy |
+| GET | `/api/tournaments` | Tất cả tournaments |
+| GET | `/api/tournaments/history` | 8 rounds FINISHED gần nhất, nhóm theo session (`SessionDto[]`) |
+| GET | `/api/tournaments/:id` | Chi tiết tournament |
+| POST | `/api/tournaments` | Tạo tournament (kèm `session_id`, `session_name`, `round_number`, `total_rounds`) |
+| POST | `/api/tournaments/:id/start` | Bắt đầu (ENABLE + init Redis scores) |
+| POST | `/api/tournaments/:id/end` | Kết thúc tự nhiên (DISABLE + lưu RoundResult + broadcast final) |
+| POST | `/api/tournaments/:id/cancel` | Huỷ thủ công (DISABLE + **không** lưu kết quả, status=CANCELLED) |
+| POST | `/api/tournaments/:id/next-round` | Tạo tournament mới kế tiếp trong cùng session |
+| GET | `/api/players` | Danh sách players |
+| GET | `/api/players/:id` | Tìm theo membership_number |
+| POST | `/api/players` | Upsert player (membership_number + display_name) |
+| PATCH | `/api/players/:id` | Cập nhật display_name |
+| DELETE | `/api/players/:id` | Xóa player |
+| GET | `/api/jackpot/pool` | Jackpot pool hiện tại |
+
+---
+
+## WebSocket Events (Socket.IO namespace `/leaderboard`)
+
+| Event | Hướng | Payload |
+|---|---|---|
+| `leaderboard_update` | Server → Client | `{ tournamentId, rankings[], roundNumber, totalRounds, endsAt }` — `endsAt`: epoch ms nếu đang chạy, `0` nếu kết thúc, `-1` noop |
+| `jackpot_hit` | Server → Client | `{ machineId, amount }` |
+| `machine_update` | Server → Client | `{ machineId, credits, coin_in, coin_out, status }` |
 
 ---
 
@@ -280,9 +378,15 @@ Chỉ thay đổi những define sau trước khi flash cho từng máy vật l�
 
 ## Database Entities
 
-- **MachineEntity** – snapshot real-time: `machine_id`, `credits`, `coin_in`, `coin_out`, `status` (ONLINE/OFFLINE/PLAYING/LOCKED/HANDPAY)
+- **MachineEntity** – snapshot real-time: `machine_id`, `display_name`, `credits`, `coin_in`, `coin_out`, `status` (ONLINE/OFFLINE/PLAYING/LOCKED/HANDPAY/DISABLED)
 - **TransactionEntity** – immutable audit log: `txn_id` (uuid), `type` (TOURNAMENT_PUMP/TOURNAMENT_WITHDRAW/JACKPOT_CASHABLE), `status` (PENDING/SUCCESS/FAILED), `aft_status_code`, `amount`, `tournament_id`
-- **TournamentEntity** – `machine_ids[]`, `initial_credits`, `duration_seconds`, `status` (SCHEDULED/ACTIVE/FINISHED)
+- **TournamentEntity** – `machine_ids[]`, `initial_credits`, `duration_seconds`, `status` (**SCHEDULED/ACTIVE/FINISHED/CANCELLED**), `session_id` (varchar 36), `session_name` (varchar 100, nullable), `round_number` (int, default 1), `total_rounds` (int, default 1)
+- **PlayerEntity** – `membership_number` (PK varchar 30), `display_name` (varchar 100)
+- **RoundResultEntity** – snapshot cuối round: `tournament_id`, `machine_id`, `player_display` (snapshot display_name), `final_score`, `rank`, `advanced` (bool), `session_id`, `round_number`, `total_rounds`
+
+**Lưu ý credits:** lưu dạng integer (10000 = $100.00). Mọi chỗ hiển thị phải ÷100 để ra $XX.XX.
+
+**Lưu ý CANCELLED:** Tournament bị STOP thủ công có status=CANCELLED. Không có `RoundResultEntity` tương ứng. `getHistory()` filter `WHERE status=FINISHED`, nên CANCELLED không xuất hiện.
 
 ---
 
@@ -291,7 +395,7 @@ Chỉ thay đổi những define sau trước khi flash cho từng máy vật l�
 | Key | Kiểu | Nội dung |
 |---|---|---|
 | `machine:{id}:state` | Hash | credits, coin_in, coin_out, state, updated_at |
-| `tourney:{id}:scores` | Sorted Set | member=machineId, score=tổng coin-in trong tournament |
+| `tourney:{id}:scores` | Sorted Set | member=machineId, score=credits hiện tại; ZREM khi máy offline |
 | `jackpot:pool` | String | Giá trị pool hiện tại (float) |
 | `jackpot:hit_value` | String | Hit value bí mật (int) |
 

@@ -83,7 +83,7 @@
  Waveshare ESP32-S3-ETH       │ 5V (VSYS / USB)     │ 500 mA
  W5500 (onboard)              │ tích hợp, 3.3V LDO  │ 150 mA
  Optocoupler 6N137 (LED side) │ 3.3V (Domain A)     │ 10 mA each
- MAX3232 + charge pump        │ 3.3V (Domain A)     │ 10 mA
+           │ 3.3V (Domain A)     │ 10 mA
  MAX3232 RS232 side           │ 5V isolated (Domain B, Mornsun) │ 200 mA
 
  Decoupling caps near MAX3232: 100nF ceramic + 10µF electrolytic trên 3.3V rail.

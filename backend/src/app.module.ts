@@ -10,10 +10,13 @@ import { DatabaseModule } from './database/database.module';
 import { DeviceGatewayModule } from './device-gateway/device-gateway.module';
 import { TournamentModule } from './tournament/tournament.module';
 import { JackpotModule } from './jackpot/jackpot.module';
+import { PlayerModule } from './player/player.module';
 import { RedisModule } from './redis/redis.module';
 import { MachineEntity } from './database/entities/machine.entity';
 import { TransactionEntity } from './database/entities/transaction.entity';
 import { TournamentEntity } from './database/entities/tournament.entity';
+import { PlayerEntity } from './database/entities/player.entity';
+import { RoundResultEntity } from './database/entities/round_result.entity';
 
 @Module({
   imports: [
@@ -30,7 +33,7 @@ import { TournamentEntity } from './database/entities/tournament.entity';
         database: cfg.get('DB_NAME'),
         username: cfg.get('DB_USER'),
         password: cfg.get('DB_PASS'),
-        entities: [MachineEntity, TransactionEntity, TournamentEntity],
+        entities: [MachineEntity, TransactionEntity, TournamentEntity, PlayerEntity, RoundResultEntity],
         synchronize: cfg.get('NODE_ENV') !== 'production',
         logging: false,
       }),
@@ -45,6 +48,7 @@ import { TournamentEntity } from './database/entities/tournament.entity';
     DeviceGatewayModule,
     TournamentModule,
     JackpotModule,
+    PlayerModule,
   ],
 })
 export class AppModule {}

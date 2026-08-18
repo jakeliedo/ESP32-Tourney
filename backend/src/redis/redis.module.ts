@@ -40,6 +40,10 @@ export class RedisService implements OnModuleInit {
     return parseFloat(result);
   }
 
+  async removeFromLeaderboard(tournamentId: number, machineId: string): Promise<void> {
+    await this.client.zrem(`tourney:${tournamentId}:scores`, machineId);
+  }
+
   async getLeaderboard(tournamentId: number, top = 20): Promise<{machineId: string; score: number}[]> {
     const results = await this.client.zrevrangebyscore(
       `tourney:${tournamentId}:scores`, '+inf', '-inf',

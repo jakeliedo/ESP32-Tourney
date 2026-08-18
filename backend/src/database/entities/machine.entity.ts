@@ -6,11 +6,12 @@ import {
 } from 'typeorm';
 
 export enum MachineStatus {
-  ONLINE   = 'online',
-  OFFLINE  = 'offline',
-  PLAYING  = 'playing',
-  LOCKED   = 'locked',
-  HANDPAY  = 'handpay',
+  ONLINE    = 'online',
+  OFFLINE   = 'offline',
+  PLAYING   = 'playing',
+  LOCKED    = 'locked',
+  HANDPAY   = 'handpay',
+  DISABLED  = 'disabled',
 }
 
 @Entity('machines')

@@ -26,7 +26,7 @@ interface TelemetryPayload {
 }
 
 interface ServerCommand {
-  type: 'AFT_PUMP' | 'AFT_WITHDRAW' | 'LOCK' | 'UNLOCK';
+  type: 'AFT_PUMP' | 'AFT_WITHDRAW' | 'LOCK' | 'UNLOCK' | 'DISABLE' | 'ENABLE';
   amount?: number;
   txn_id?: string;
 }
@@ -34,7 +34,8 @@ interface ServerCommand {
 @Injectable()
 export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
   private client: mqtt.MqttClient;
-  private lastCoinIn = new Map<string, number>();
+  private lastCoinIn   = new Map<string, number>();
+  private lastCredits  = new Map<string, number>();
 
   constructor(
     private cfg: ConfigService,
@@ -104,6 +105,27 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
         { machine_id: machineId, status: isOnline ? MachineStatus.ONLINE : MachineStatus.OFFLINE },
         ['machine_id'],
       );
+
+      // When machine goes offline, remove it from the active tournament leaderboard
+      // and broadcast the updated (possibly empty) rankings immediately.
+      if (!isOnline) {
+        const activeTourney = await this.tournaments.findOne({
+          where: { status: TournamentStatus.ACTIVE },
+          order: { id: 'DESC' },
+        });
+        if (activeTourney) {
+          await this.redis.removeFromLeaderboard(activeTourney.id, machineId);
+          const rankings = await this.redis.getLeaderboard(activeTourney.id);
+          const rawEnd = activeTourney.started_at
+            ? new Date(activeTourney.started_at).getTime() + activeTourney.duration_seconds * 1000
+            : null;
+          const endsAt = rawEnd && rawEnd > Date.now() ? rawEnd : -1;
+          this.leaderboard.broadcastLeaderboard(
+            activeTourney.id, rankings,
+            activeTourney.round_number, activeTourney.total_rounds, endsAt,
+          );
+        }
+      }
     }
   }
 
@@ -145,22 +167,25 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
     // 4. Push machine update via WebSocket
     this.leaderboard.broadcastMachineUpdate(machineId, data);
 
-    // 5. Update tournament score if machine is in an active tournament
-    const prevCoinIn = this.lastCoinIn.get(machineId) ?? data.coin_in;
-    const delta = data.coin_in - prevCoinIn;
-    this.lastCoinIn.set(machineId, data.coin_in);
+    // 5. Update tournament leaderboard when credits change.
+    //    ALL machines are tracked in the sorted set (not just machine_ids) so the
+    //    leaderboard always shows every connected machine's current credits.
+    const lastCreds = this.lastCredits.get(machineId);
+    this.lastCredits.set(machineId, data.credits);
 
-    if (delta < 0) {
-      // Simulator restarted from 0 — reset tracking without scoring
-      this.lastCoinIn.set(machineId, data.coin_in);
-    } else if (delta > 0) {
+    if (lastCreds !== data.credits) {
       const activeTourney = await this.tournaments.findOne({
         where: { status: TournamentStatus.ACTIVE },
+        order: { id: 'DESC' },
       });
-      if (activeTourney && activeTourney.machine_ids.includes(machineId)) {
-        await this.redis.incrementScore(activeTourney.id, machineId, delta);
+      if (activeTourney) {
+        await this.redis.updateScore(activeTourney.id, machineId, data.credits);
         const rankings = await this.redis.getLeaderboard(activeTourney.id);
-        this.leaderboard.broadcastLeaderboard(activeTourney.id, rankings);
+        const rawEnd = activeTourney.started_at
+          ? new Date(activeTourney.started_at).getTime() + activeTourney.duration_seconds * 1000
+          : null;
+        const endsAt = rawEnd && rawEnd > Date.now() ? rawEnd : -1;
+        this.leaderboard.broadcastLeaderboard(activeTourney.id, rankings, activeTourney.round_number, activeTourney.total_rounds, endsAt);
       }
     }
   }
@@ -180,6 +205,7 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
       3: MachineStatus.LOCKED,
       4: MachineStatus.HANDPAY,
       5: MachineStatus.OFFLINE,
+      6: MachineStatus.DISABLED,
     };
     return map[state] ?? MachineStatus.ONLINE;
   }

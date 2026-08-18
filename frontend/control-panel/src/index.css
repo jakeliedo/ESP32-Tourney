@@ -14,9 +14,11 @@
   --border:       #1c1f2e;
   --border-2:     #242840;
   --online:       #2d9e5f;
+  --playing:      #7050c8;
   --offline:      #3e3e50;
   --locked:       #2f7ab4;
   --handpay:      #b03030;
+  --disabled:     #b87030;
 }
 
 html, body, #root {
@@ -139,6 +141,14 @@ input[type="number"], input[type="text"] {
 }
 input:focus { border-color: var(--gold-dim); }
 input::placeholder { color: var(--text-3); }
+/* Hide number spinners globally */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type="number"] { -moz-appearance: textfield; }
+/* Restore spinners for the rounds input only */
+input[type="number"].with-spin::-webkit-inner-spin-button,
+input[type="number"].with-spin::-webkit-outer-spin-button { -webkit-appearance: auto; }
+input[type="number"].with-spin { -moz-appearance: number-input; }
 
 /* ── Status dot ──────────────────────── */
 .dot {
@@ -148,10 +158,27 @@ input::placeholder { color: var(--text-3); }
   margin-right: 5px;
   vertical-align: middle;
 }
-.dot-online  { background: var(--online); box-shadow: 0 0 5px var(--online); }
-.dot-offline { background: var(--offline); }
-.dot-locked  { background: var(--locked); }
-.dot-handpay { background: var(--handpay); }
+.dot-online    { background: var(--online);   box-shadow: 0 0 5px var(--online); }
+.dot-playing   { background: var(--playing);  box-shadow: 0 0 5px var(--playing); }
+.dot-offline   { background: var(--offline); }
+.dot-locked    { background: var(--locked); }
+.dot-handpay   { background: var(--handpay); }
+.dot-disabled  { background: var(--disabled); }
+
+/* ── Status badge (DeviceDashboard) ─── */
+.badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 9px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+}
+.badge-online    { background: rgba(45,158,95,.14);   color: var(--online); }
+.badge-playing   { background: rgba(112,80,200,.14);  color: var(--playing); }
+.badge-locked    { background: rgba(47,122,180,.14);  color: var(--locked); }
+.badge-handpay   { background: rgba(176,48,48,.14);   color: var(--handpay); }
+.badge-disabled  { background: rgba(184,112,48,.14);  color: var(--disabled); }
+.badge-offline   { background: rgba(62,62,80,.18);    color: var(--text-3); }
 
 /* ── Section label ───────────────────── */
 .section-label {

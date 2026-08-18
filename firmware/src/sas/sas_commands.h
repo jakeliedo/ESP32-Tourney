@@ -9,6 +9,10 @@
 
 // ── SAS Command Codes ──────────────────────────────────────────
 #define SAS_CMD_GENERAL_POLL        0x00  // 2-byte address poll
+#define SAS_CMD_SHUTDOWN            0x01  // Long Poll 01: Shutdown (Lock Out Play) – Type S
+#define SAS_CMD_STARTUP             0x02  // Long Poll 02: Startup (Enable Play) – Type S
+#define SAS_CMD_ENABLE_BILL         0x06  // Long Poll 06: Enable Bill Acceptor – Type S
+#define SAS_CMD_DISABLE_BILL        0x07  // Long Poll 07: Disable Bill Acceptor – Type S
 #define SAS_CMD_SEND_CREDITS        0x1A  // Long Poll 1A: Current Credit Meter
 #define SAS_CMD_SEND_HANDPAY        0x1B  // Long Poll 1B: Handpay Information
 #define SAS_CMD_METERS_POLL         0xAF  // Long Poll AF: Extended Meters
@@ -91,6 +95,17 @@ typedef struct {
  * @return frame length (always 2)
  */
 size_t sas_build_general_poll(uint8_t* buf, uint8_t address);
+
+/**
+ * Build a Type-S Long Poll (short command, no data payload).
+ * Used for: Shutdown(0x01), Startup(0x02), EnableBill(0x06), DisableBill(0x07).
+ * Machine responds with a single ACK byte (== address) or NACK (address | 0x80).
+ * @param buf     Output buffer (min 4 bytes)
+ * @param address SAS machine address
+ * @param cmd     SAS_CMD_SHUTDOWN / STARTUP / ENABLE_BILL / DISABLE_BILL
+ * @return frame length (always 4)
+ */
+size_t sas_build_lp_simple(uint8_t* buf, uint8_t address, uint8_t cmd);
 
 /**
  * Build Long Poll 1A – Request Current Credit Meter.

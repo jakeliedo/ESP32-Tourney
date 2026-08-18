@@ -3,23 +3,27 @@ import { io, Socket } from 'socket.io-client';
 
 interface RankEntry { machineId: string; score: number; rank: number; }
 interface JackpotAlert { machineId: string; amount: number; }
+interface RoundInfo { roundNumber: number; totalRounds: number; }
 
 const MEDAL = ['#c8a84b', '#a8a8b8', '#a0724a'];
+
 
 export default function LiveLeaderboard() {
   const [rankings, setRankings]   = useState<RankEntry[]>([]);
   const [jackpot, setJackpot]     = useState<JackpotAlert | null>(null);
   const [tournId, setTournId]     = useState<number | null>(null);
   const [flash, setFlash]         = useState<Set<string>>(new Set());
+  const [roundInfo, setRoundInfo] = useState<RoundInfo | null>(null);
   const prevScores                = useRef<Record<string,number>>({});
   const socketRef                 = useRef<Socket | null>(null);
 
   useEffect(() => {
-    const s = io('/leaderboard', { transports: ['websocket'] });
+    const s = io('/leaderboard', { transports: ['websocket', 'polling'] });
     socketRef.current = s;
 
     s.on('leaderboard_update', (data: any) => {
       if (data.tournamentId) setTournId(data.tournamentId);
+      if (data.roundNumber) setRoundInfo({ roundNumber: data.roundNumber, totalRounds: data.totalRounds ?? 1 });
       const ranked: RankEntry[] = (data.rankings ?? []).map(
         (r: any, i: number) => ({ ...r, rank: i + 1 }),
       );
@@ -55,13 +59,27 @@ export default function LiveLeaderboard() {
       {/* Header */}
       <div style={s.header}>
         <div style={s.headerLeft}>
-          <span style={s.logoPlaceholder}>◈</span>
+          <div style={s.logoWrap}>
+            <img src="/logo.png" alt="JAKELIEDO" style={{ height: 40, width: 'auto' }}/>
+          </div>
           <div>
-            <div style={s.brand}>GMI TOURNAMENT</div>
-            {tournId
-              ? <div style={s.sub}>Tournament #{tournId} · LIVE</div>
-              : <div style={s.sub}>Waiting for tournament…</div>
-            }
+            <div style={s.brand}>SLOT TOURNAMENT</div>
+            {tournId ? (
+              <div style={s.sub}>
+                Tournament #{tournId}
+                {roundInfo && (
+                  <span style={{ marginLeft: 8 }}>
+                    · Round {roundInfo.roundNumber}/{roundInfo.totalRounds}
+                    {roundInfo.roundNumber === roundInfo.totalRounds && roundInfo.totalRounds > 1 && (
+                      <span style={{ color: '#e8b84b', marginLeft: 6 }}>FINAL</span>
+                    )}
+                  </span>
+                )}
+                {' · LIVE'}
+              </div>
+            ) : (
+              <div style={s.sub}>Waiting for tournament…</div>
+            )}
           </div>
         </div>
         <div style={s.liveDot}>
@@ -99,8 +117,7 @@ export default function LiveLeaderboard() {
                 color: isFlashing ? '#c8a84b' : isTop ? '#ede8d8' : 'var(--text-2)',
                 transition: 'color .4s ease',
               }}>
-                {entry.score.toLocaleString()}
-                <span style={s.pts}>pts</span>
+                ${(entry.score / 100).toFixed(2)}
               </span>
             </div>
           );
@@ -113,7 +130,7 @@ export default function LiveLeaderboard() {
           <div style={s.jackpotBox}>
             <div style={s.jackpotLabel}>MYSTERY JACKPOT</div>
             <div style={s.jackpotMachine}>{jackpot.machineId}</div>
-            <div style={s.jackpotAmount}>{jackpot.amount.toLocaleString()} CR</div>
+            <div style={s.jackpotAmount}>${(jackpot.amount / 100).toFixed(2)}</div>
           </div>
         </div>
       )}
@@ -140,6 +157,10 @@ const s: Record<string, React.CSSProperties> = {
     fontFamily: 'Georgia, serif',
     fontSize: 20, fontWeight: 700,
     letterSpacing: '.12em', color: 'var(--gold)',
+  },
+  logoWrap: {
+    background: '#fff', borderRadius: 8, padding: '3px 6px',
+    display: 'inline-flex', alignItems: 'center', flexShrink: 0,
   },
   sub: { fontSize: 11, color: 'var(--text-2)', letterSpacing: '.06em', marginTop: 2 },
   liveDot: {

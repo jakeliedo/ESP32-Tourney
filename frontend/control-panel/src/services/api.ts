@@ -4,8 +4,9 @@ const api = axios.create({ baseURL: '/api' });
 
 export interface Machine {
   machine_id: string;
+  display_name: string;
   ip_address: string;
-  status: 'online' | 'offline' | 'playing' | 'locked' | 'handpay';
+  status: 'online' | 'offline' | 'playing' | 'locked' | 'handpay' | 'disabled';
   credits: number;
   coin_in: number;
   coin_out: number;
@@ -19,8 +20,41 @@ export interface Tournament {
   machine_ids: string[];
   initial_credits: number;
   duration_seconds: number;
+  session_id?: string;
+  session_name?: string;
+  round_number?: number;
+  total_rounds?: number;
   started_at?: string;
   ended_at?: string;
+}
+
+export interface Player {
+  membership_number: string;
+  display_name: string;
+}
+
+export interface RoundResultDto {
+  rank: number;
+  machineId: string;
+  playerDisplay: string;
+  finalScore: number;
+}
+
+export interface RoundDto {
+  tournamentId: number;
+  roundNumber: number;
+  totalRounds: number;
+  durationSeconds: number;
+  machineCount: number;
+  endedAt: string;
+  results: RoundResultDto[];
+}
+
+export interface SessionDto {
+  sessionId: string;
+  date: string;
+  sessionName: string;
+  rounds: RoundDto[];
 }
 
 // Machines
@@ -51,5 +85,24 @@ export const startTournament = (id: number): Promise<void> =>
 
 export const endTournament = (id: number): Promise<void> =>
   api.post(`/tournaments/${id}/end`).then(() => undefined);
+
+export const cancelTournament = (id: number): Promise<void> =>
+  api.post(`/tournaments/${id}/cancel`).then(() => undefined);
+
+export const nextRound = (id: number): Promise<Tournament> =>
+  api.post<Tournament>(`/tournaments/${id}/next-round`).then(r => r.data);
+
+export const getHistory = (): Promise<SessionDto[]> =>
+  api.get<SessionDto[]>('/tournaments/history').then(r => r.data);
+
+// Players
+export const getPlayers = (): Promise<Player[]> =>
+  api.get<Player[]>('/players').then(r => r.data);
+
+export const upsertPlayer = (data: Player): Promise<Player> =>
+  api.post<Player>('/players', data).then(r => r.data);
+
+export const deletePlayer = (membershipNumber: string): Promise<void> =>
+  api.delete(`/players/${encodeURIComponent(membershipNumber)}`).then(() => undefined);
 
 export default api;

@@ -13,6 +13,11 @@ export class TournamentController {
     return this.svc.findAll();
   }
 
+  @Get('history')
+  getHistory() {
+    return this.svc.getHistory();
+  }
+
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.svc.findOne(id);
@@ -31,6 +36,16 @@ export class TournamentController {
   @Post(':id/end')
   end(@Param('id', ParseIntPipe) id: number) {
     return this.svc.end(id);
+  }
+
+  @Post(':id/cancel')
+  cancel(@Param('id', ParseIntPipe) id: number) {
+    return this.svc.cancel(id);
+  }
+
+  @Post(':id/next-round')
+  nextRound(@Param('id', ParseIntPipe) id: number) {
+    return this.svc.nextRound(id);
   }
 
   @Get(':id/leaderboard')

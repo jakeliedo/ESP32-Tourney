@@ -143,6 +143,19 @@ static void report_event(uint8_t exc, uint32_t credits,
     xQueueSend(g_report_queue, &ev, 0);  // non-blocking; drop if full
 }
 
+// ── Type-S simple command (Shutdown/Startup/Enable|Disable Bill) ──
+
+static bool execute_simple_command(uint8_t sas_cmd) {
+    uint8_t frame[4];
+    uint8_t resp[1];
+    size_t frame_len = sas_build_lp_simple(frame, SAS_MACHINE_ADDRESS, sas_cmd);
+    sas_send_frame(frame, frame_len, false);
+    size_t n = sas_receive(resp, 1);
+    bool acked = (n == 1 && resp[0] == SAS_MACHINE_ADDRESS);
+    if (!acked) ESP_LOGW(TAG, "LP 0x%02X: no ACK (n=%d)", sas_cmd, (int)n);
+    return acked;
+}
+
 // ── AFT execution ──────────────────────────────────────────────
 
 static void execute_aft_command(const ServerCommand* cmd) {
@@ -240,7 +253,39 @@ void sas_polling_task(void* pvParameters) {
         // ── 1. Check for incoming server command ────────────────
         ServerCommand cmd;
         if (xQueueReceive(g_command_queue, &cmd, 0) == pdTRUE) {
-            execute_aft_command(&cmd);
+            switch (cmd.cmd_type) {
+                case CMD_AFT_PUMP:
+                case CMD_AFT_WITHDRAW:
+                    execute_aft_command(&cmd);
+                    break;
+                case CMD_LOCK:
+                    execute_simple_command(SAS_CMD_SHUTDOWN);
+                    s_state = SLOT_STATE_TOURNAMENT_LOCKED;
+                    ESP_LOGI(TAG, "LOCK: LP 0x01 Shutdown sent");
+                    break;
+                case CMD_UNLOCK:
+                    execute_simple_command(SAS_CMD_STARTUP);
+                    s_state = SLOT_STATE_IDLE;
+                    ESP_LOGI(TAG, "UNLOCK: LP 0x02 Startup sent");
+                    break;
+                case CMD_DISABLE:
+                    execute_simple_command(SAS_CMD_SHUTDOWN);
+                    vTaskDelay(pdMS_TO_TICKS(40));
+                    execute_simple_command(SAS_CMD_DISABLE_BILL);
+                    s_state = SLOT_STATE_DISABLED;
+                    ESP_LOGI(TAG, "DISABLE: LP 0x01 + LP 0x07 sent");
+                    break;
+                case CMD_ENABLE:
+                    execute_simple_command(SAS_CMD_STARTUP);
+                    vTaskDelay(pdMS_TO_TICKS(40));
+                    execute_simple_command(SAS_CMD_ENABLE_BILL);
+                    s_state = SLOT_STATE_IDLE;
+                    ESP_LOGI(TAG, "ENABLE: LP 0x02 + LP 0x06 sent");
+                    break;
+                default:
+                    ESP_LOGW(TAG, "Unknown command type: %d", cmd.cmd_type);
+                    break;
+            }
         }
 
         // ── 2. General Poll to get exception code ───────────────

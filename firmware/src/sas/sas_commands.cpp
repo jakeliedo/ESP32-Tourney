@@ -26,6 +26,19 @@ void uint32_to_bcd(uint32_t value, uint8_t* bcd, size_t bytes) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Type-S Long Poll — Shutdown / Startup / Enable|Disable Bill
+// Format: [ADDR(MARK)] [CMD(SPACE)] [CRC_L(SPACE)] [CRC_H(SPACE)]
+// Response: [ADDR] = ACK  |  [ADDR | 0x80] = NACK
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_simple(uint8_t* buf, uint8_t address, uint8_t cmd) {
+    buf[0] = address;
+    buf[1] = cmd;
+    crc16_append(buf, 2);
+    return 4;
+}
+
+// ─────────────────────────────────────────────────────────────
 // General Poll (2 bytes, no CRC)
 // Format: [ADDR] [ADDR]  (address byte sent twice, both with MARK parity)
 // ─────────────────────────────────────────────────────────────

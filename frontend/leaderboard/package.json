@@ -1,10 +1,40 @@
 {
   "name": "leaderboard",
   "version": "1.0.0",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "vite --port 5174",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:dev": "concurrently -k -s first -n Vite,Electron -c blue,green \"vite --port 5174\" \"wait-on http://localhost:5174 && electron . --dev\"",
+    "electron:build": "npm run build && electron-builder",
+    "electron:pack": "electron-builder"
+  },
+  "build": {
+    "appId": "com.jakeliedo.slot-leaderboard",
+    "productName": "Slot Tournament Leaderboard",
+    "asar": true,
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/main.js",
+      "electron/preload.js"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/config.json",
+        "to": "config.json"
+      }
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "public/logo.png"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   },
   "dependencies": {
     "react": "^18.2.0",
@@ -15,7 +45,15 @@
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.0.0",
+    "concurrently": "^8.2.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.0",
     "typescript": "^5.1.0",
-    "vite": "^5.0.0"
+    "vite": "^5.0.0",
+    "wait-on": "^7.2.0"
+  },
+  "allowScripts": {
+    "electron@31.7.7": true,
+    "esbuild@0.21.5": true
   }
 }

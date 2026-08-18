@@ -23,8 +23,8 @@ export class LeaderboardGateway implements OnGatewayConnection {
     this.server.emit('machine_update', { machineId, ...data });
   }
 
-  broadcastLeaderboard(tournamentId: number, rankings: object[]) {
-    this.server.emit('leaderboard_update', { tournamentId, rankings });
+  broadcastLeaderboard(tournamentId: number, rankings: object[], roundNumber = 1, totalRounds = 1, endsAt = -1) {
+    this.server.emit('leaderboard_update', { tournamentId, rankings, roundNumber, totalRounds, endsAt });
   }
 
   broadcastJackpotHit(machineId: string, amount: number) {

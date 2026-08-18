@@ -46,6 +46,8 @@ static void on_message(char* topic, uint8_t* payload, unsigned int length) {
     else if (strcmp(type, "AFT_WITHDRAW") == 0) cmd.cmd_type = CMD_AFT_WITHDRAW;
     else if (strcmp(type, "LOCK")         == 0) cmd.cmd_type = CMD_LOCK;
     else if (strcmp(type, "UNLOCK")       == 0) cmd.cmd_type = CMD_UNLOCK;
+    else if (strcmp(type, "DISABLE")      == 0) cmd.cmd_type = CMD_DISABLE;
+    else if (strcmp(type, "ENABLE")       == 0) cmd.cmd_type = CMD_ENABLE;
     else {
         ESP_LOGW(TAG, "Unknown command type: %s", type);
         return;
