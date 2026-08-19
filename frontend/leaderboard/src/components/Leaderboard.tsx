@@ -16,8 +16,9 @@ const ROWS = 10;
 const MEDALS = ['#FFD060', '#C0C8D0', '#D4904A'];
 
 // Electron preload exposes window.__config__; browser/Vite-dev falls back to ''
-const backendUrl: string   = (window as any).__config__?.backendUrl       ?? '';
-const bgImageUrl: string   = (window as any).__config__?.backgroundImage  ?? './bg.jpg';
+const backendUrl: string      = (window as any).__config__?.backendUrl       ?? '';
+const bgImageUrl: string      = (window as any).__config__?.backgroundImage  ?? './bg.jpg';
+const jackpotVideoUrl: string | null = (window as any).__config__?.jackpotVideo ?? null;
 
 // ─── LAYOUT — pixel grid for 1920 × 1080 fullscreen ─────────────────────────
 // All px values measured directly on the 1920×1080 canvas.
@@ -61,6 +62,28 @@ if (!document.getElementById(STYLE_ID)) {
       0%,100% { box-shadow: 0 0 60px rgba(200,168,75,.25); }
       50%      { box-shadow: 0 0 120px rgba(200,168,75,.55); }
     }
+    @keyframes vjpPanelGlow {
+      0%,100% {
+        box-shadow:
+          0 0 18px rgba(0,180,255,.30),
+          0 0 40px rgba(0,180,255,.14),
+          inset 0 0 18px rgba(0,180,255,.06);
+      }
+      50% {
+        box-shadow:
+          0 0 32px rgba(0,200,255,.55),
+          0 0 70px rgba(0,180,255,.28),
+          inset 0 0 28px rgba(0,180,255,.10);
+      }
+    }
+    @keyframes vjpAmountShimmer {
+      0%,100% { filter: drop-shadow(0 0 6px rgba(0,210,255,.60)); }
+      50%      { filter: drop-shadow(0 0 14px rgba(0,230,255,.95)); }
+    }
+    @keyframes vjpTitlePulse {
+      0%,100% { opacity: .85; }
+      50%      { opacity: 1; }
+    }
   `;
   document.head.appendChild(el);
 }
@@ -79,11 +102,15 @@ export default function Leaderboard() {
   const [timeLeft, setTimeLeft]   = useState<number | null>(null);
   // Duration shown before tournament starts (from SCHEDULED tournament)
   const [standbyTime, setStandbyTime] = useState<number | null>(null);
+  // Virtual jackpot pool — updated by jackpot_pool_update socket event
+  const [vjpPool, setVjpPool]     = useState<number | null>(null);
 
   const endTimeRef           = useRef<number | null>(null);
   const prevScores           = useRef<Record<string, number>>({});
   const tournIdRef           = useRef<number | null>(null);
   const lastRestTournIdRef   = useRef<number | null>(null);
+  const jackpotTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const jackpotVideoRef      = useRef<HTMLVideoElement>(null);
 
   // ── Poll /api/machines every 2 s ─────────────────────────────────────────
   useEffect(() => {
@@ -203,9 +230,26 @@ export default function Leaderboard() {
   }, []);
 
   const onJackpotHit = useCallback((data: any) => {
+    if (jackpotTimerRef.current) clearTimeout(jackpotTimerRef.current);
     setJackpot({ machineId: data.machineId, amount: data.amount });
-    setTimeout(() => setJackpot(null), 9000);
+    jackpotTimerRef.current = setTimeout(() => {
+      setJackpot(null);
+      jackpotTimerRef.current = null;
+    }, 6500);
   }, []);
+
+  const handleJackpotVideoEnded = useCallback(() => {
+    if (jackpotTimerRef.current) { clearTimeout(jackpotTimerRef.current); jackpotTimerRef.current = null; }
+    setJackpot(null);
+  }, []);
+
+  // Auto-play video when jackpot fires
+  useEffect(() => {
+    if (jackpot && jackpotVideoRef.current) {
+      jackpotVideoRef.current.currentTime = 0;
+      jackpotVideoRef.current.play().catch(() => {});
+    }
+  }, [jackpot]);
 
   const onMachineUpdate = useCallback((data: any) => {
     setConnected(prev => {
@@ -217,7 +261,11 @@ export default function Leaderboard() {
     });
   }, []);
 
-  useWebSocket(onLeaderboard, onJackpotHit, onMachineUpdate);
+  const onJackpotPool = useCallback((data: any) => {
+    if (typeof data.pool === 'number') setVjpPool(data.pool);
+  }, []);
+
+  useWebSocket(onLeaderboard, onJackpotHit, onMachineUpdate, onJackpotPool);
 
   // ── Build display rows ────────────────────────────────────────────────────
   const preTournRanks: RankEntry[] = [...connected]
@@ -308,6 +356,58 @@ export default function Leaderboard() {
           {timerStr}
         </span>
       </div>
+
+      {/* ── VIRTUAL JACKPOT PANEL — top-LEFT, mirrors timer circle ────────
+           Positioned symmetrically: left:2.8%, same top/size as timer.
+           Uses text-shadow glow (no WebkitTextFillColor) for reliable rendering. */}
+      {tournamentRunning && vjpPool !== null && (
+        <div style={{
+          position: 'absolute',
+          left:   TIMER.right,   // '2.8%' — symmetric axis with timer on right
+          top:    TIMER.top,     // '4.7%' — same vertical origin
+          width:  TIMER.size,    // '9.2vw' — exact same diameter
+          height: TIMER.size,    // '9.2vw' — circle
+          borderRadius: '50%',
+          background: 'rgba(0,5,20,0.84)',
+          border: '1px solid rgba(0,180,255,0.42)',
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          zIndex: 20,
+          animation: 'vjpPanelGlow 2.8s ease-in-out infinite',
+        }}>
+          {/* Label — mirrors "TIME LEFT" label style in timer */}
+          <span style={{
+            fontSize: '0.62vw',
+            color: '#00c8ff',
+            letterSpacing: '0.18em',
+            fontFamily: "'Consolas', monospace",
+            fontWeight: 700,
+            marginBottom: '0.5vw',
+            textTransform: 'uppercase',
+            textShadow: '0 0 8px rgba(0,200,255,0.75)',
+            animation: 'vjpTitlePulse 2s ease-in-out infinite',
+          }}>
+            JACKPOT
+          </span>
+
+          {/* Amount — mirrors timer digit style, neon blue glow */}
+          <span style={{
+            fontFamily: "'Georgia', serif",
+            fontSize: '1.55vw',
+            fontWeight: 700,
+            color: '#cce8ff',
+            fontVariantNumeric: 'tabular-nums',
+            lineHeight: 1,
+            textShadow: '0 0 1.2vw rgba(0,200,255,0.85), 0 0 0.4vw rgba(140,220,255,0.65)',
+            letterSpacing: '0.04em',
+            transition: 'color 0.4s, text-shadow 0.4s',
+            animation: 'vjpAmountShimmer 2.2s ease-in-out infinite',
+            whiteSpace: 'nowrap',
+          }}>
+            {`$${(vjpPool / 100).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          </span>
+        </div>
+      )}
 
       {/* ── TOURNAMENT INFO BADGE — small, bottom-left ───────────────────── */}
       {(tournId || roundInfo) && (
@@ -433,18 +533,35 @@ export default function Leaderboard() {
       {jackpot && (
         <div style={{
           position: 'absolute', inset: 0,
-          background: 'rgba(8,4,0,0.94)',
+          background: 'rgba(4,0,0,0.55)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           zIndex: 99,
         }}>
           <div style={{
             border: '1px solid rgba(200,168,75,0.4)',
             borderRadius: 12,
-            padding: '4vw 6vw',
+            padding: jackpotVideoUrl ? '2vw 3vw 3vw' : '4vw 6vw',
             textAlign: 'center',
             background: 'radial-gradient(ellipse at center, #1a0f00 0%, #08060a 70%)',
             animation: 'jpGlow 1.6s ease-in-out infinite',
+            width: jackpotVideoUrl ? '42vw' : undefined,
           }}>
+            {jackpotVideoUrl && (
+              <video
+                ref={jackpotVideoRef}
+                src={jackpotVideoUrl}
+                onEnded={handleJackpotVideoEnded}
+                muted={false}
+                playsInline
+                style={{
+                  width: '100%',
+                  borderRadius: 8,
+                  marginBottom: '1.5vw',
+                  display: 'block',
+                  background: '#000',
+                }}
+              />
+            )}
             <div style={{
               fontSize: '0.9vw', fontWeight: 700, letterSpacing: '0.28em',
               color: '#c8a84b', marginBottom: '1.5vw',

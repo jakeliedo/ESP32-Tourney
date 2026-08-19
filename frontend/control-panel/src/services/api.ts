@@ -105,4 +105,18 @@ export const upsertPlayer = (data: Player): Promise<Player> =>
 export const deletePlayer = (membershipNumber: string): Promise<void> =>
   api.delete(`/players/${encodeURIComponent(membershipNumber)}`).then(() => undefined);
 
+// Virtual Jackpot
+export interface VirtualJackpotConfig {
+  floor: number;    // credits (e.g. 10000 = $100.00)
+  ceiling: number;  // credits (e.g. 30000 = $300.00)
+  rate: number;     // percentage (e.g. 1.0 = 1%)
+  enabled: boolean;
+}
+
+export const setVirtualJackpotConfig = (config: VirtualJackpotConfig): Promise<void> =>
+  api.post('/jackpot/virtual/config', config).then(() => undefined);
+
+export const getVirtualJackpotPool = (): Promise<{ pool: number }> =>
+  api.get<{ pool: number }>('/jackpot/virtual/pool').then(r => r.data);
+
 export default api;

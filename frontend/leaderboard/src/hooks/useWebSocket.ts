@@ -10,9 +10,10 @@ import { io, Socket } from 'socket.io-client';
 const backendUrl = (window as any).__config__?.backendUrl ?? '';
 
 export function useWebSocket(
-  onLeaderboard:   (data: any) => void,
-  onJackpotHit:    (data: any) => void,
+  onLeaderboard:    (data: any) => void,
+  onJackpotHit:     (data: any) => void,
   onMachineUpdate?: (data: any) => void,
+  onJackpotPool?:   (data: any) => void,
 ) {
   const socketRef = useRef<Socket | null>(null);
 
@@ -24,14 +25,15 @@ export function useWebSocket(
     });
     socketRef.current = socket;
 
-    socket.on('leaderboard_update', onLeaderboard);
-    socket.on('jackpot_hit',        onJackpotHit);
-    if (onMachineUpdate) socket.on('machine_update', onMachineUpdate);
+    socket.on('leaderboard_update',   onLeaderboard);
+    socket.on('jackpot_hit',          onJackpotHit);
+    if (onMachineUpdate) socket.on('machine_update',      onMachineUpdate);
+    if (onJackpotPool)   socket.on('jackpot_pool_update', onJackpotPool);
 
     socket.on('disconnect', () => {
       console.warn('WebSocket disconnected – reconnecting...');
     });
-  }, [onLeaderboard, onJackpotHit, onMachineUpdate]);
+  }, [onLeaderboard, onJackpotHit, onMachineUpdate, onJackpotPool]);
 
   useEffect(() => {
     connect();

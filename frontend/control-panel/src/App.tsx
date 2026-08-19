@@ -3,6 +3,7 @@ import { io, Socket } from 'socket.io-client';
 import api, {
   getMachines, sendMachineCommand, aftInAll, aftOutAll,
   createTournament, startTournament, endTournament, cancelTournament,
+  setVirtualJackpotConfig,
   Machine, Player, SessionDto,
   getHistory, getPlayers, upsertPlayer, deletePlayer,
 } from './services/api';
@@ -54,6 +55,10 @@ export default function App() {
   const [newMembership, setNewMembership]    = useState('');
   const [newPlayerName, setNewPlayerName]    = useState('');
   const [sessionName, setSessionName]        = useState('');
+  const [vjpEnabled, setVjpEnabled]          = useState(false);
+  const [vjpFloor,   setVjpFloor]            = useState('100');
+  const [vjpCeiling, setVjpCeiling]          = useState('300');
+  const [vjpRate,    setVjpRate]             = useState('1');
   const socketRef                            = useRef<Socket | null>(null);
   const endTimeRef                           = useRef<number | null>(null);
   const activeTournIdRef                     = useRef<number | null>(null);
@@ -221,6 +226,14 @@ export default function App() {
   };
 
   const handleStart = async () => {
+    // Push virtual jackpot config to backend before starting
+    setVirtualJackpotConfig({
+      floor:   Math.round((parseFloat(vjpFloor)   || 100) * 100),
+      ceiling: Math.round((parseFloat(vjpCeiling) || 300) * 100),
+      rate:    parseFloat(vjpRate) || 1,
+      enabled: vjpEnabled,
+    }).catch(() => {});
+
     // Auto-select all connected (non-offline) machines — no manual "Enable All" required
     const enabled = machines.filter(m => m.status.toLowerCase() !== 'offline');
     if (!enabled.length) return;
@@ -410,6 +423,48 @@ export default function App() {
             disabled={!!sessionIdRef.current}
             style={{ flex: 1, opacity: sessionIdRef.current ? 0.4 : 1 }}
           />
+        </div>
+
+        {/* Virtual Jackpot Engine */}
+        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            fontSize: 11, color: vjpEnabled ? '#5bb8ff' : 'var(--text-2)',
+            cursor: 'pointer', flexShrink: 0, fontWeight: vjpEnabled ? 600 : 400,
+            transition: 'color .2s',
+          }}>
+            <input
+              type="checkbox"
+              checked={vjpEnabled}
+              onChange={e => setVjpEnabled(e.target.checked)}
+              disabled={tournamentActive}
+              style={{ cursor: 'pointer', accentColor: '#5bb8ff' }}
+            />
+            Virtual Jackpot
+          </label>
+          {vjpEnabled && <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Floor $</span>
+              <input type="number" value={vjpFloor}
+                onChange={e => setVjpFloor(e.target.value)}
+                min="1" disabled={tournamentActive}
+                style={{ width: 60, opacity: tournamentActive ? 0.4 : 1 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Ceiling $</span>
+              <input type="number" value={vjpCeiling}
+                onChange={e => setVjpCeiling(e.target.value)}
+                min="1" disabled={tournamentActive}
+                style={{ width: 60, opacity: tournamentActive ? 0.4 : 1 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Rate %</span>
+              <input type="number" value={vjpRate}
+                onChange={e => setVjpRate(e.target.value)}
+                min="0.1" max="100" step="0.1" disabled={tournamentActive}
+                style={{ width: 52, opacity: tournamentActive ? 0.4 : 1 }} />
+            </div>
+          </>}
         </div>
       </div>
 
