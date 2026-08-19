@@ -296,6 +296,7 @@ Control panel (:5173) là **một trang duy nhất** (`App.tsx`), layout dọc:
 - `tournamentRunning=false` + có máy → hiện credits thực tế (pre-tourney view)
 - Không có máy kết nối → bảng trống hoàn toàn (kể cả khi có stale data trong state)
 - Máy offline trong lúc tournament → bị ZREM khỏi leaderboard ngay lập tức
+- **Tên hiển thị:** leaderboard poll `GET /api/machines` mỗi **2 giây** → build `nameMap[machineId → display_name]`. Đổi tên máy trên control panel sẽ phản ánh lên leaderboard trong vòng tối đa 2 giây.
 
 ---
 
