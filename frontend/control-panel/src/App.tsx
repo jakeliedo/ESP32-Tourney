@@ -3,8 +3,9 @@ import { io, Socket } from 'socket.io-client';
 import api, {
   getMachines, sendMachineCommand, aftInAll, aftOutAll,
   createTournament, startTournament, endTournament, cancelTournament,
-  setVirtualJackpotConfig,
-  Machine, Player, SessionDto,
+  setVirtualJackpotConfig, getVirtualJackpotVideoUrl, uploadJackpotVideo, clearJackpotVideo,
+  getJackpotHits,
+  Machine, Player, SessionDto, JackpotHit,
   getHistory, getPlayers, upsertPlayer, deletePlayer,
 } from './services/api';
 
@@ -59,6 +60,10 @@ export default function App() {
   const [vjpFloor,   setVjpFloor]            = useState('100');
   const [vjpCeiling, setVjpCeiling]          = useState('300');
   const [vjpRate,    setVjpRate]             = useState('1');
+  const [vjpVideoName, setVjpVideoName]      = useState<string | null>(null);
+  const [vjpVideoUploading, setVjpVideoUploading] = useState(false);
+  const [jackpotHits, setJackpotHits]        = useState<JackpotHit[]>([]);
+  const vjpVideoRef                          = useRef<HTMLInputElement>(null);
   const socketRef                            = useRef<Socket | null>(null);
   const endTimeRef                           = useRef<number | null>(null);
   const activeTournIdRef                     = useRef<number | null>(null);
@@ -312,9 +317,33 @@ export default function App() {
     setSessionName('');
   };
 
+  // ── VJP video — load current filename on mount ────────────
+  useEffect(() => {
+    getVirtualJackpotVideoUrl().then(r => { if (r.name) setVjpVideoName(r.name); }).catch(() => {});
+  }, []);
+
+  const handleVjpVideoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setVjpVideoUploading(true);
+    try {
+      const r = await uploadJackpotVideo(file);
+      if (r.ok) setVjpVideoName(r.name);
+    } catch { /* ignore */ } finally {
+      setVjpVideoUploading(false);
+      if (vjpVideoRef.current) vjpVideoRef.current.value = '';
+    }
+  };
+
+  const handleClearVjpVideo = async () => {
+    await clearJackpotVideo().catch(() => {});
+    setVjpVideoName(null);
+  };
+
   // ── History + Players ─────────────────────────────────────
   const loadHistory = useCallback(() => {
     getHistory().then(setHistory).catch(() => {});
+    getJackpotHits().then(setJackpotHits).catch(() => {});
   }, []);
 
   const loadPlayers = useCallback(() => {
@@ -463,6 +492,36 @@ export default function App() {
                 onChange={e => setVjpRate(e.target.value)}
                 min="0.1" max="100" step="0.1" disabled={tournamentActive}
                 style={{ width: 52, opacity: tournamentActive ? 0.4 : 1 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Hit Video</span>
+              <input
+                ref={vjpVideoRef}
+                type="file"
+                accept="video/*"
+                onChange={handleVjpVideoChange}
+                style={{ display: 'none' }}
+              />
+              <button
+                className="btn-neutral"
+                style={{
+                  fontSize: 10, padding: '2px 8px',
+                  color: vjpVideoName ? '#5bb8ff' : 'var(--text-2)',
+                  maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}
+                title={vjpVideoName ?? 'No video selected'}
+                onClick={() => vjpVideoRef.current?.click()}
+                disabled={vjpVideoUploading}
+              >
+                {vjpVideoUploading ? '…' : vjpVideoName ? vjpVideoName : 'Browse…'}
+              </button>
+              {vjpVideoName && (
+                <button
+                  onClick={handleClearVjpVideo}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#e06060', fontSize: 13, lineHeight: 1, padding: '0 2px' }}
+                  title="Remove video"
+                >✕</button>
+              )}
             </div>
           </>}
         </div>
@@ -646,6 +705,33 @@ export default function App() {
                             );
                           })
                       }
+                      {/* Jackpot hits for this session */}
+                      {(() => {
+                        const hits = jackpotHits.filter(h => h.session_id === session.sessionId);
+                        if (!hits.length) return null;
+                        return (
+                          <div style={{ borderTop: '1px solid rgba(91,184,255,0.15)', marginTop: 4 }}>
+                            <div style={{ fontSize: 9, color: '#5bb8ff', letterSpacing: '.1em', padding: '4px 12px 2px', fontFamily: 'monospace' }}>
+                              ⚡ JACKPOT HITS
+                            </div>
+                            {hits.map(h => {
+                              const t = new Date(h.hit_at);
+                              const time = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}`;
+                              return (
+                                <div key={h.id} style={{ ...s.histRow, padding: '2px 12px' }}>
+                                  <span style={{ flex: 1, fontSize: 11, color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {h.machine_id ?? '—'}
+                                  </span>
+                                  <span style={{ fontVariantNumeric: 'tabular-nums', fontSize: 11, fontWeight: 700, color: '#5bb8ff', flexShrink: 0 }}>
+                                    ${(Number(h.amount) / 100).toFixed(2)}
+                                  </span>
+                                  <span style={{ fontSize: 10, color: 'var(--text-3)', marginLeft: 6, flexShrink: 0 }}>{time}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })

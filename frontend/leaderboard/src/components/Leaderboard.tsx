@@ -16,9 +16,8 @@ const ROWS = 10;
 const MEDALS = ['#FFD060', '#C0C8D0', '#D4904A'];
 
 // Electron preload exposes window.__config__; browser/Vite-dev falls back to ''
-const backendUrl: string      = (window as any).__config__?.backendUrl       ?? '';
-const bgImageUrl: string      = (window as any).__config__?.backgroundImage  ?? './bg.jpg';
-const jackpotVideoUrl: string | null = (window as any).__config__?.jackpotVideo ?? null;
+const backendUrl: string = (window as any).__config__?.backendUrl      ?? '';
+const bgImageUrl: string = (window as any).__config__?.backgroundImage ?? './bg.jpg';
 
 // ─── LAYOUT — pixel grid for 1920 × 1080 fullscreen ─────────────────────────
 // All px values measured directly on the 1920×1080 canvas.
@@ -103,7 +102,8 @@ export default function Leaderboard() {
   // Duration shown before tournament starts (from SCHEDULED tournament)
   const [standbyTime, setStandbyTime] = useState<number | null>(null);
   // Virtual jackpot pool — updated by jackpot_pool_update socket event
-  const [vjpPool, setVjpPool]     = useState<number | null>(null);
+  const [vjpPool, setVjpPool]         = useState<number | null>(null);
+  const [jackpotVideoUrl, setJackpotVideoUrl] = useState<string | null>(null);
 
   const endTimeRef           = useRef<number | null>(null);
   const prevScores           = useRef<Record<string, number>>({});
@@ -111,6 +111,14 @@ export default function Leaderboard() {
   const lastRestTournIdRef   = useRef<number | null>(null);
   const jackpotTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
   const jackpotVideoRef      = useRef<HTMLVideoElement>(null);
+
+  // ── Fetch jackpot video URL on mount ─────────────────────────────────────
+  useEffect(() => {
+    fetch(`${backendUrl}/api/jackpot/virtual/video-url`)
+      .then(r => r.json())
+      .then((d: { url: string | null }) => { if (d.url) setJackpotVideoUrl(backendUrl + d.url); })
+      .catch(() => {});
+  }, []);
 
   // ── Poll /api/machines every 2 s ─────────────────────────────────────────
   useEffect(() => {
@@ -230,6 +238,7 @@ export default function Leaderboard() {
   }, []);
 
   const onJackpotHit = useCallback((data: any) => {
+    if (data.videoUrl) setJackpotVideoUrl(backendUrl + data.videoUrl);
     if (jackpotTimerRef.current) clearTimeout(jackpotTimerRef.current);
     setJackpot({ machineId: data.machineId, amount: data.amount });
     jackpotTimerRef.current = setTimeout(() => {

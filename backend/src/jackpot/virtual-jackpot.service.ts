@@ -16,6 +16,7 @@ import { Repository } from 'typeorm';
 import { RedisService } from '../redis/redis.module';
 import { LeaderboardGateway } from '../device-gateway/leaderboard.gateway';
 import { TournamentEntity, TournamentStatus } from '../database/entities/tournament.entity';
+import { JackpotHitEntity } from '../database/entities/jackpot_hit.entity';
 
 @Injectable()
 export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
@@ -33,6 +34,8 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
     private leaderboard: LeaderboardGateway,
     @InjectRepository(TournamentEntity)
     private tournaments: Repository<TournamentEntity>,
+    @InjectRepository(JackpotHitEntity)
+    private jackpotHits: Repository<JackpotHitEntity>,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -126,8 +129,18 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
         // Jackpot fires — award to the current tournament leader
         const rankings = await this.redis.getLeaderboard(active.id);
         const winner   = rankings[0]?.machineId ?? 'VIRTUAL';
-        console.log(`🎰 Virtual Jackpot HIT — ${winner}: $${(Math.floor(pool) / 100).toFixed(2)}`);
-        this.leaderboard.broadcastJackpotHit(winner, Math.floor(pool));
+        const amount   = Math.floor(pool);
+        console.log(`🎰 Virtual Jackpot HIT — ${winner}: $${(amount / 100).toFixed(2)}`);
+        // Persist hit record
+        await this.jackpotHits.save({
+          machine_id:    winner,
+          amount,
+          tournament_id: active.id,
+          session_id:    active.session_id ?? null,
+        });
+        // Broadcast with optional video URL
+        const videoUrl = await this.redis.get('vjp:video_url');
+        this.leaderboard.broadcastJackpotHit(winner, amount, videoUrl || null);
         // Reset pool and re-arm
         pool = this.floor;
         await this.redis.set('vjp:hit', String(this.newHitValue()));

@@ -27,8 +27,8 @@ export class LeaderboardGateway implements OnGatewayConnection {
     this.server.emit('leaderboard_update', { tournamentId, rankings, roundNumber, totalRounds, endsAt });
   }
 
-  broadcastJackpotHit(machineId: string, amount: number) {
-    this.server.emit('jackpot_hit', { machineId, amount, timestamp: Date.now() });
+  broadcastJackpotHit(machineId: string, amount: number, videoUrl?: string | null) {
+    this.server.emit('jackpot_hit', { machineId, amount, videoUrl: videoUrl ?? null, timestamp: Date.now() });
   }
 
   broadcastJackpotPool(pool: number) {

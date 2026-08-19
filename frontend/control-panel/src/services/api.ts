@@ -113,10 +113,34 @@ export interface VirtualJackpotConfig {
   enabled: boolean;
 }
 
+export interface JackpotHit {
+  id: number;
+  machine_id: string | null;
+  amount: number;
+  tournament_id: number | null;
+  session_id: string | null;
+  hit_at: string;
+}
+
 export const setVirtualJackpotConfig = (config: VirtualJackpotConfig): Promise<void> =>
   api.post('/jackpot/virtual/config', config).then(() => undefined);
 
 export const getVirtualJackpotPool = (): Promise<{ pool: number }> =>
   api.get<{ pool: number }>('/jackpot/virtual/pool').then(r => r.data);
+
+export const getVirtualJackpotVideoUrl = (): Promise<{ url: string | null; name: string | null }> =>
+  api.get<{ url: string | null; name: string | null }>('/jackpot/virtual/video-url').then(r => r.data);
+
+export const uploadJackpotVideo = (file: File): Promise<{ ok: boolean; url: string; name: string }> => {
+  const form = new FormData();
+  form.append('file', file);
+  return api.post('/jackpot/virtual/video', form).then(r => r.data);
+};
+
+export const clearJackpotVideo = (): Promise<{ ok: boolean }> =>
+  api.post('/jackpot/virtual/video/clear').then(r => r.data);
+
+export const getJackpotHits = (): Promise<JackpotHit[]> =>
+  api.get<JackpotHit[]>('/jackpot/hits').then(r => r.data);
 
 export default api;

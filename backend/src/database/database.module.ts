@@ -8,10 +8,11 @@ import { TransactionEntity } from './entities/transaction.entity';
 import { TournamentEntity } from './entities/tournament.entity';
 import { PlayerEntity } from './entities/player.entity';
 import { RoundResultEntity } from './entities/round_result.entity';
+import { JackpotHitEntity } from './entities/jackpot_hit.entity';
 import { MachineController } from './machine.controller';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([MachineEntity, TransactionEntity, TournamentEntity, PlayerEntity, RoundResultEntity])],
+  imports: [TypeOrmModule.forFeature([MachineEntity, TransactionEntity, TournamentEntity, PlayerEntity, RoundResultEntity, JackpotHitEntity])],
   controllers: [MachineController],
   exports: [TypeOrmModule],
 })
