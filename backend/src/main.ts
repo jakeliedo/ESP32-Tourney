@@ -10,17 +10,30 @@ import * as fs from 'fs';
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
-  // Serve uploaded files (jackpot video, etc.)
-  const uploadsDir = join(process.cwd(), 'uploads');
-  fs.mkdirSync(uploadsDir, { recursive: true });
-  app.useStaticAssets(uploadsDir, { prefix: '/uploads' });
-
-  // Enable CORS for frontend clients
+  // CORS — allow dev frontends and Electron (file:// sends null Origin)
   app.enableCors({
-    origin: ['http://localhost:5173', 'http://localhost:5174'],
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      const allowed = ['http://localhost:5173', 'http://localhost:5174'];
+      if (!origin || origin === 'null' || allowed.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     credentials: true,
   });
+
+  // Serve uploaded files (jackpot video, etc.)
+  // A CORS header is added explicitly because express static middleware
+  // bypasses the NestJS CORS pipeline — Electron renderers need this.
+  const uploadsDir = join(process.cwd(), 'uploads');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  app.use('/uploads', (_req: any, res: any, next: any) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    next();
+  });
+  app.useStaticAssets(uploadsDir, { prefix: '/uploads' });
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port);
