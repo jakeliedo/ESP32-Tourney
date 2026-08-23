@@ -56,7 +56,10 @@ Lợi ích: module hỏng có thể thay nhanh bằng cách chuyển thẻ SD sa
 
 ## Phase 5 — Chuẩn bị triển khai thực tế ⬜ TODO
 
+- [x] Chọn phần cứng Control PC — tái sử dụng mainboard **AEWIN MB-8390 REV.A1** (Mini-ITX, thiết kế cho AMD Embedded R-Series, gốc digital signage/POS/kiosk) sẵn có, thay thế hoàn toàn máy dev Windows khi chạy thật. Xuất hình 3×HDMI+1×DP (đủ 2 màn hình Control Panel + Leaderboard). RAM 8GB (2×4GB DDR3L-1600), lưu trữ thẻ CFast 16/32GB. Mạng: chạy standalone, 1 LAN nối switch chính (chung với 12 module ESP32), 1 LAN dự phòng cho internet. Chi tiết & nguồn tham khảo: xem plan `t-i-c-m-t-mainboard-robust-dragonfly.md`.
+- [ ] Chốt CPU cho Control PC: đang chạy **A10-5700M** (4 core, mạnh nhất, nhưng không nằm trong whitelist BIOS chính thức của AEWIN — phải bấm Enter qua cảnh báo mỗi lần boot) — cân nhắc thử **R-464L** (4 core, cùng TDP 35W, nằm trong whitelist CPU chính thức cùng dòng R-series như R-272F, khả năng cao boot sạch không cần Enter). R-272F là phương án dự phòng cuối nếu 2 CPU trên có vấn đề.
+- [ ] Cài đặt hạ tầng trên Control PC theo hướng **native Windows, không dùng Docker Desktop/WSL2** (khác máy dev) để tiết kiệm RAM/CPU trên phần cứng yếu: PostgreSQL (installer chính thức), Mosquitto (installer chính thức), Redis qua bản port Windows (tporadowski/redis hoặc Memurai), Node.js LTS cho backend + 2 frontend build sẵn, chạy nền qua NSSM/pm2 để tự khởi động cùng Windows.
 - [ ] Bảo mật Mosquitto (TLS, ACL theo machine_id)
 - [ ] Hạ tầng PoE switch/injector nếu dùng PoE
 - [ ] Giám sát/logging production
-- [ ] Docker production hardening (secrets thật, không dùng password mặc định trong `.env`)
+- [ ] Docker production hardening (secrets thật, không dùng password mặc định trong `.env`) — áp dụng cho máy dev/CI, Control PC dùng hướng native ở trên
