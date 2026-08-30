@@ -1,36 +1,43 @@
 #pragma once
 // =============================================================
-// config.h – Central configuration for Waveshare ESP32-S3-ETH
-// Target MCU : ESP32-S3 (Xtensa LX7 dual-core, 240 MHz)
-// Ethernet   : W5500 onboard (SPI2 / FSPI bus)
+// config.h – Central configuration for WAVGAT/WT32-ETH01-Evo
+// Target MCU : ESP32-C3 (RISC-V single-core, 160 MHz)
+// Ethernet   : DM9051NP onboard (SPI, internal traces – fixed)
 // All hardware pins, network parameters and SAS settings here.
 // =============================================================
 
 // ──────────────────────────────────────────────────────────────
-// W5500 SPI pin mapping (onboard, Waveshare ESP32-S3-ETH)
-// Source: https://www.waveshare.com/wiki/ESP32-S3-ETH
-// DO NOT change – traces are fixed on the PCB.
+// DM9051 SPI pin mapping (onboard, ETH01-Evo)
+// Confirmed by 3 independent sources with real-hardware testing:
+// ESPresense #1467, ESPHome PR #6861, androegg.de shop page.
+// Not on the exposed header – internal traces, DO NOT change.
 // ──────────────────────────────────────────────────────────────
-#define ETH_MOSI_PIN  11
-#define ETH_MISO_PIN  12
-#define ETH_SCLK_PIN  13
-#define ETH_CS_PIN    14
-#define ETH_RST_PIN    9   // set to -1 to disable hardware reset
-#define ETH_INT_PIN   10   // interrupt-driven reception (INPUT only)
-#define ETH_SPI_FREQ  8000000  // 8 MHz – reduce to 4M if signal noise
-
-// NOTE: GPIO33–GPIO37 are internally occupied (Octal Flash/PSRAM).
-// Do NOT assign any peripheral to GPIO33, 34, 35, 36, 37.
+#define ETH_MOSI_PIN     10
+#define ETH_MISO_PIN      3
+#define ETH_SCLK_PIN      7
+#define ETH_CS_PIN        9   // also the GPIO9 boot-strapping pin (CS idle-high = boot bit 1, consistent)
+#define ETH_RST_PIN       6
+#define ETH_INT_PIN       8
+#define ETH_SPI_FREQ_MHZ  8   // MHz (not Hz!). Community-tested up to 20MHz OK, 26MHz+ causes read errors.
 
 // ──────────────────────────────────────────────────────────────
-// RS232 / SAS UART  (UART2, via MAX3232 + Optocoupler)
-// GPIO17 (TX) và GPIO16 (RX): xác nhận FREE trên pinout chính thức.
-// UART0 (GPIO43/44) được dùng riêng cho debug Serial – không đụng vào.
+// ESP32-C3 strapping pins – GPIO2, GPIO8, GPIO9 (official datasheet).
+// GPIO8/GPIO9 are already claimed by DM9051 (INT/CS) above – fine,
+// their required boot levels match the chip's idle SPI state.
+// Avoid GPIO2 for anything else (vendor uses it for AT-mode TXD).
 // ──────────────────────────────────────────────────────────────
-#define SAS_UART_NUM    UART_NUM_2
+
+// ──────────────────────────────────────────────────────────────
+// RS232 / SAS UART  (UART1, via MAX3232 + Optocoupler)
+// GPIO18/GPIO19: confirmed "Universal IO" (no strapping, no
+// multiplex function) on the official ETH01-Evo pin table.
+// UART0 (GPIO1/GPIO3 on the debug header) stays for Serial/flashing.
+// NOTE: ESP32-C3 only has UART0 and UART1 – no UART2.
+// ──────────────────────────────────────────────────────────────
+#define SAS_UART_NUM    UART_NUM_1
 #define SAS_UART_BAUD   19200     // SAS standard baud rate
-#define SAS_UART_TX_PIN 17        // Header pin 34 (left side)
-#define SAS_UART_RX_PIN 16        // Header pin 32 (left side)
+#define SAS_UART_TX_PIN 18
+#define SAS_UART_RX_PIN 19
 #define SAS_UART_BUF    512
 
 // Polling cycle must not exceed 40 ms (SAS 6.0x requirement)

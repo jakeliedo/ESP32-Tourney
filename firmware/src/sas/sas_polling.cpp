@@ -1,5 +1,5 @@
 // =============================================================
-// sas_polling.cpp – SAS FreeRTOS Task (Core 1)
+// sas_polling.cpp – SAS FreeRTOS Task
 //
 // Key design points from research:
 //  - 9-bit UART emulation: toggle UART_PARITY_MARK/SPACE per byte
@@ -7,6 +7,13 @@
 //  - CRC-16 validated on every Long Poll response
 //  - State machine tracks INIT/IDLE/PLAYING/TOURNAMENT_LOCKED/HANDPAY/OFFLINE
 //  - Retries up to SAS_MAX_RETRIES before declaring machine offline
+//
+// NOTE: ESP32-C3 is single-core – this task shares Core 0 with the
+// MQTT Network Task. Isolation comes from FreeRTOS priority (this
+// task runs at configMAX_PRIORITIES-1, highest), not core pinning.
+// UART reads block/yield (uart_read_bytes with a tick timeout) rather
+// than busy-spin, so the lower-priority MQTT task still gets CPU time
+// during each poll cycle's wait windows.
 // =============================================================
 #include "sas_polling.h"
 #include "sas_commands.h"
@@ -392,9 +399,9 @@ void sas_polling_task_start() {
         "SAS_POLL",
         TASK_STACK_SAS,
         NULL,
-        configMAX_PRIORITIES - 1,  // Highest priority
+        configMAX_PRIORITIES - 1,  // Highest priority – preempts MQTT task on this single core
         NULL,
-        1                          // Core 1
+        0                          // Core 0 (ESP32-C3 is single-core)
     );
 }
 

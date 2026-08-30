@@ -1,15 +1,15 @@
 // =============================================================
-// main.cpp – ESP32 GMI Module Entry Point
+// main.cpp – ESP32-C3 GMI Module Entry Point (ETH01-Evo)
 //
 // Boot sequence:
 //  1. Initialise NVS flash
-//  2. Configure UART for SAS (9600 baud, 8N1 base, parity toggled at runtime)
-//  3. Initialise W5500 Ethernet (ETH.h, lwIP, DHCP)
+//  2. Configure UART for SAS (19200 baud, 8N1 base, parity toggled at runtime)
+//  3. Initialise DM9051 Ethernet (ETH.h, lwIP, DHCP)
 //  4. Initialise MQTT client
-//  5. Start FreeRTOS tasks:
-//     - SAS Polling Task  → Core 1, highest priority
+//  5. Start FreeRTOS tasks (single core – separated by priority, not core):
+//     - SAS Polling Task  → Core 0, highest priority
 //     - Network/MQTT Task → Core 0, medium priority
-//     - Watchdog Task     → any core, lowest priority
+//     - Watchdog Task     → Core 0, lowest priority
 // =============================================================
 #include <Arduino.h>
 #include <nvs_flash.h>
@@ -77,10 +77,10 @@ void setup() {
     // 4. MQTT client configuration
     mqtt_client_init();
 
-    // 5. Start FreeRTOS tasks
-    sas_polling_task_start();   // Core 1, highest priority
-    mqtt_task_start();           // Core 0, medium priority
-    watchdog_task_start();       // Any core, lowest priority
+    // 5. Start FreeRTOS tasks (single core – priority-separated)
+    sas_polling_task_start();   // Highest priority
+    mqtt_task_start();           // Medium priority
+    watchdog_task_start();       // Lowest priority
 
     ESP_LOGI(TAG, "All tasks started. IP: %s", eth_manager_get_ip().c_str());
 }

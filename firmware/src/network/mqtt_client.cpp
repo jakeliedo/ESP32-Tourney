@@ -1,11 +1,14 @@
 // =============================================================
-// mqtt_client.cpp – MQTT Network Task (Core 0)
+// mqtt_client.cpp – MQTT Network Task
 //
 // Responsibilities:
 //  - Maintain persistent MQTT connection to broker
 //  - Drain Report_Queue → serialize to JSON → publish
 //  - Receive command JSON from server → parse → push to Command_Queue
 //  - Reconnect automatically on disconnect
+//
+// NOTE: Runs on Core 0 at medium priority, sharing the single
+// ESP32-C3 core with the higher-priority SAS Polling Task.
 // =============================================================
 #include "mqtt_client.h"
 #include "eth_manager.h"
