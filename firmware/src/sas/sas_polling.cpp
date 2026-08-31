@@ -2,7 +2,16 @@
 // sas_polling.cpp – SAS FreeRTOS Task
 //
 // Key design points from research:
-//  - 9-bit UART emulation: toggle UART_PARITY_MARK/SPACE per byte
+//  - 9-bit UART emulation on TX: ESP-IDF has no UART_PARITY_MARK/SPACE
+//    (confirmed absent from hal/uart_types.h – only DISABLE/EVEN/ODD
+//    exist). Instead we pick EVEN or ODD per byte based on that byte's
+//    own popcount, so the resulting parity bit lands on the desired
+//    9th-bit value (see uart_set_parity_for_bit9()).
+//  - RX needs no such trick: per SAS 6.02 spec Section 1.2.1, the EGM
+//    is never bus master and clears the wakeup bit on every byte it
+//    sends back, so all response bytes carry bit9=0 by protocol
+//    definition (the lone exception, Section 4.2 loop-break "chirp",
+//    only fires once the host has stopped polling for 5s already).
 //  - 40ms strict polling cycle via vTaskDelayUntil
 //  - CRC-16 validated on every Long Poll response
 //  - State machine tracks INIT/IDLE/PLAYING/TOURNAMENT_LOCKED/HANDPAY/OFFLINE
@@ -42,29 +51,32 @@ static int     s_retry_count      = 0;
 // ── Internal UART helpers ──────────────────────────────────────
 
 /**
- * Reconfigure UART parity to simulate SAS 9th bit.
- * MARK parity → bit9 = 1 → Address byte
- * SPACE parity → bit9 = 0 → Data byte
+ * Force the parity bit (SAS 9th/wakeup bit) to a specific value for
+ * this byte, using only EVEN/ODD (MARK/SPACE don't exist in ESP-IDF).
+ * EVEN parity sets the bit so total 1-count (data+parity) is even,
+ * i.e. parity_bit = popcount(byte) % 2. ODD gives the complement.
+ * Picking whichever of EVEN/ODD yields the wanted bit, per byte,
+ * reproduces MARK (bit9=1) for address bytes and SPACE (bit9=0) for
+ * data bytes regardless of the byte's own value.
  */
-static void uart_set_parity_mark() {
-    uart_set_parity(SAS_UART_NUM, UART_PARITY_MARK);
-}
-
-static void uart_set_parity_space() {
-    uart_set_parity(SAS_UART_NUM, UART_PARITY_SPACE);
+static void uart_set_parity_for_bit9(uint8_t byte, bool bit9_high) {
+    bool even_gives_1 = (__builtin_popcount(byte) % 2) == 1;
+    bool want_even = bit9_high ? even_gives_1 : !even_gives_1;
+    uart_set_parity(SAS_UART_NUM, want_even ? UART_PARITY_EVEN : UART_PARITY_ODD);
 }
 
 /**
- * Transmit a single byte with the correct parity setting.
- * Address bytes get MARK, all subsequent data bytes get SPACE.
+ * Transmit a single byte with the correct 9th-bit value.
+ * Address bytes get bit9=1, all subsequent data bytes get bit9=0.
+ * Must wait for the byte (incl. its parity bit) to fully shift out
+ * before returning, since the next call may change the parity
+ * register for the following byte – changing it mid-shift would
+ * corrupt the bit actually placed on the wire.
  */
 static void sas_send_byte(uint8_t byte, bool is_address) {
-    if (is_address) {
-        uart_set_parity_mark();
-    } else {
-        uart_set_parity_space();
-    }
+    uart_set_parity_for_bit9(byte, is_address);
     uart_write_bytes(SAS_UART_NUM, (const char*)&byte, 1);
+    uart_wait_tx_done(SAS_UART_NUM, pdMS_TO_TICKS(10));
 }
 
 /**

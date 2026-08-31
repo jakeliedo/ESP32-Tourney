@@ -1,23 +1,24 @@
 // =============================================================
 // crc16.cpp – CRC-16 implementation for SAS protocol
+//
+// Ported verbatim from SAS 6.02 spec Section 5.1, Figure 5.1
+// ("byte-oriented tableless algorithm", nibble-based). Confirmed
+// against the spec text: initial seed value is zero (Section 5.2),
+// NOT 0xFFFF – a prior CRC-16/CCITT-FALSE implementation here was
+// wrong on both the seed and the reflected/non-reflected bit order.
+// Magic constant 0x1081 (octal 010201 in the original) is derived
+// from the CRC polynomial x^16+x^12+x^5+1.
 // =============================================================
 #include "crc16.h"
 
-// SAS uses CRC-16/CCITT-FALSE: poly=0x1021, init=0xFFFF, refIn=false
-static const uint16_t CRC16_POLY = 0x1021;
-static const uint16_t CRC16_INIT = 0xFFFF;
-
 uint16_t crc16_sas(const uint8_t* data, size_t length) {
-    uint16_t crc = CRC16_INIT;
+    uint16_t crc = 0;  // spec Section 5.2: initial seed value of zero
     for (size_t i = 0; i < length; i++) {
-        crc ^= (uint16_t)data[i] << 8;
-        for (int bit = 0; bit < 8; bit++) {
-            if (crc & 0x8000) {
-                crc = (crc << 1) ^ CRC16_POLY;
-            } else {
-                crc <<= 1;
-            }
-        }
+        unsigned c = data[i];
+        unsigned q = (crc ^ c) & 0x0F;
+        crc = (crc >> 4) ^ (q * 0x1081);
+        q = (crc ^ (c >> 4)) & 0x0F;
+        crc = (crc >> 4) ^ (q * 0x1081);
     }
     return crc;
 }

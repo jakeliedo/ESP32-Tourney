@@ -1,7 +1,8 @@
 #pragma once
 // =============================================================
 // crc16.h – CRC-16 for SAS protocol frame validation
-// Polynomial: 0x1021 (CRC-CCITT) as used in SAS 6.0x standard
+// Direct port of the official reference algorithm (SAS 6.02 spec,
+// Section 5.1 Figure 5.1): nibble-based, tableless, seed=0.
 // =============================================================
 #include <stdint.h>
 #include <stddef.h>
