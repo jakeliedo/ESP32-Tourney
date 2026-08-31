@@ -10,15 +10,19 @@
 #include "../../include/config.h"
 
 #include <ETH.h>
+#include <WiFi.h>       // WiFi.onEvent() is the generic network event registrar
 #include <SPI.h>
+#include <driver/spi_master.h>  // SPI2_HOST (spi_host_device_t)
 #include <esp_log.h>
 
 static const char* TAG  = "ETH_MGR";
 static bool s_eth_connected = false;
 
 // Arduino Core v3.x ETH event handler
-static void eth_event_handler(arduino_event_id_t event,
-                               arduino_event_info_t info) {
+// NOTE: this installed core version predates the Network/NetworkEvents
+// API – events are registered via WiFi.onEvent() even for Ethernet-only
+// projects (WiFiEvent_t event, no separate info struct needed here).
+static void eth_event_handler(WiFiEvent_t event) {
     switch (event) {
         case ARDUINO_EVENT_ETH_START:
             ESP_LOGI(TAG, "ETH started");
@@ -53,7 +57,7 @@ static void eth_event_handler(arduino_event_id_t event,
 }
 
 bool eth_manager_init() {
-    Network.onEvent(eth_event_handler);
+    WiFi.onEvent(eth_event_handler);
 
     // Begin DM9051 via SPI – Arduino Core v3.x ETH.h API
     // DM9051 acts as MAC/PHY only; lwIP handles TCP/IP stack

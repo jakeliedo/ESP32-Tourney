@@ -16,11 +16,11 @@
 #include <driver/uart.h>
 #include <esp_log.h>
 
-#include "include/config.h"
-#include "src/network/eth_manager.h"
-#include "src/network/mqtt_client.h"
-#include "src/sas/sas_polling.h"
-#include "src/watchdog/watchdog_task.h"
+#include "config.h"
+#include "network/eth_manager.h"
+#include "network/mqtt_client.h"
+#include "sas/sas_polling.h"
+#include "watchdog/watchdog_task.h"
 
 static const char* TAG = "MAIN";
 
@@ -34,7 +34,7 @@ static void uart_sas_init() {
         .stop_bits           = UART_STOP_BITS_1,
         .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
         .rx_flow_ctrl_thresh = 0,
-        .source_clk          = UART_SCLK_DEFAULT,
+        .source_clk          = UART_SCLK_APB,
     };
 
     ESP_ERROR_CHECK(uart_param_config(SAS_UART_NUM, &cfg));
