@@ -17,6 +17,7 @@
 #include <esp_log.h>
 
 #include "config.h"
+#include "machine_config.h"
 #include "network/eth_manager.h"
 #include "network/mqtt_client.h"
 #include "sas/sas_polling.h"
@@ -57,7 +58,7 @@ void setup() {
     Serial.begin(115200);
     ESP_LOGI(TAG, "ESP32 GMI Module booting...");
 
-    // 1. NVS – required for transaction persistence and ETH.h
+    // 1. NVS – required for machine ID, transaction persistence and ETH.h
     esp_err_t nvs_err = nvs_flash_init();
     if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
         nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -65,6 +66,9 @@ void setup() {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ESP_ERROR_CHECK(nvs_flash_init());
     }
+
+    // 1b. Machine identity from NVS (blocks in provisioning mode if no ID stored)
+    machine_config_init();
 
     // 2. UART for SAS RS232 interface
     uart_sas_init();

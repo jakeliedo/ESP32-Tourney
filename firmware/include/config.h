@@ -48,32 +48,23 @@
 #define SAS_RESPONSE_TIMEOUT  20
 
 // ──────────────────────────────────────────────────────────────
-// SAS Machine Address (1–127, set per physical machine)
+// SAS Machine Address – derived at runtime from NVS machine_id.
+// g_machine_id (uint8_t) is set by machine_config_init().
 // ──────────────────────────────────────────────────────────────
-#define SAS_MACHINE_ADDRESS  0x01
 
 // ──────────────────────────────────────────────────────────────
 // Network / MQTT
+// Per-machine values (IP, Client ID, topics) are derived at runtime
+// by machine_config.cpp from the provisioned machine ID stored in NVS.
+// IP formula: 192.168.100.(199 + machine_id)   e.g. ID=1 → .200
 // ──────────────────────────────────────────────────────────────
-
-// Static IP (SF110D-16 is unmanaged – no DHCP server).
-// Change per machine. Must be in same /23 subnet as broker PC.
-// Use comma-separated octets so IPAddress(ETH_STATIC_IP) compiles directly.
-#define ETH_STATIC_IP    192, 168, 100, 200
 #define ETH_STATIC_GW    192, 168, 100,   1
 #define ETH_STATIC_MASK  255, 255, 254,   0
 
 #define MQTT_BROKER_HOST  "192.168.100.69"
 #define MQTT_BROKER_PORT  1883
-#define MQTT_CLIENT_ID    "GMI-Machine-01"
 #define MQTT_USER         "esp32"
 #define MQTT_PASS         "changeme"
-
-// MQTT Topics
-#define MQTT_TOPIC_TELEMETRY   "casino/machine/01/telemetry"
-#define MQTT_TOPIC_EVENTS      "casino/machine/01/events"
-#define MQTT_TOPIC_COMMANDS    "casino/machine/01/commands"
-#define MQTT_TOPIC_STATUS      "casino/machine/01/status"
 
 // ──────────────────────────────────────────────────────────────
 // FreeRTOS Task Stack Sizes

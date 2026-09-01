@@ -13,6 +13,7 @@
 #include "mqtt_client.h"
 #include "eth_manager.h"
 #include "../../include/config.h"
+#include "../machine_config.h"
 #include "../sas/sas_polling.h"
 
 #include <PubSubClient.h>
@@ -31,7 +32,7 @@ static PubSubClient s_mqtt(s_net_client);
 // ── MQTT incoming message callback ────────────────────────────
 
 static void on_message(char* topic, uint8_t* payload, unsigned int length) {
-    if (strcmp(topic, MQTT_TOPIC_COMMANDS) != 0) return;
+    if (strcmp(topic, g_topic_commands) != 0) return;
 
     // Parse JSON command from server
     StaticJsonDocument<256> doc;
@@ -78,11 +79,11 @@ static void mqtt_reconnect() {
         ESP_LOGI(TAG, "Connecting to MQTT broker %s:%d ...",
                  MQTT_BROKER_HOST, MQTT_BROKER_PORT);
 
-        if (s_mqtt.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS,
-                           MQTT_TOPIC_STATUS, 1, true, "offline")) {
+        if (s_mqtt.connect(g_mqtt_client_id, MQTT_USER, MQTT_PASS,
+                           g_topic_status, 1, true, "offline")) {
             ESP_LOGI(TAG, "MQTT connected");
-            s_mqtt.subscribe(MQTT_TOPIC_COMMANDS);
-            s_mqtt.publish(MQTT_TOPIC_STATUS, "online", true);
+            s_mqtt.subscribe(g_topic_commands);
+            s_mqtt.publish(g_topic_status, "online", true);
         } else {
             ESP_LOGW(TAG, "MQTT connect failed rc=%d, retry in %lums",
                      s_mqtt.state(), (unsigned long)delay_ms);
@@ -96,7 +97,7 @@ static void mqtt_reconnect() {
 
 static void serialize_and_publish(const MachineEvent* ev) {
     StaticJsonDocument<256> doc;
-    doc["machine_id"] = MQTT_CLIENT_ID;
+    doc["machine_id"] = g_mqtt_client_id;
     doc["exception"]  = ev->exception_code;
     doc["credits"]    = ev->credits;
     doc["coin_in"]    = ev->coin_in;
@@ -107,7 +108,7 @@ static void serialize_and_publish(const MachineEvent* ev) {
 
     char buf[256];
     serializeJson(doc, buf, sizeof(buf));
-    s_mqtt.publish(MQTT_TOPIC_TELEMETRY, buf);
+    s_mqtt.publish(g_topic_telemetry, buf);
 }
 
 // ── Network Task main loop (Core 0) ───────────────────────────
@@ -156,5 +157,5 @@ void mqtt_task_start() {
 }
 
 void mqtt_publish_telemetry(const char* json) {
-    s_mqtt.publish(MQTT_TOPIC_TELEMETRY, json);
+    s_mqtt.publish(g_topic_telemetry, json);
 }

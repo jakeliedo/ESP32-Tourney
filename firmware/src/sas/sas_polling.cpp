@@ -28,6 +28,7 @@
 #include "sas_commands.h"
 #include "crc16.h"
 #include "../../include/config.h"
+#include "../machine_config.h"
 
 #include <Arduino.h>
 #include <driver/uart.h>
@@ -167,10 +168,10 @@ static void report_event(uint8_t exc, uint32_t credits,
 static bool execute_simple_command(uint8_t sas_cmd) {
     uint8_t frame[4];
     uint8_t resp[1];
-    size_t frame_len = sas_build_lp_simple(frame, SAS_MACHINE_ADDRESS, sas_cmd);
+    size_t frame_len = sas_build_lp_simple(frame, g_machine_id, sas_cmd);
     sas_send_frame(frame, frame_len, false);
     size_t n = sas_receive(resp, 1);
-    bool acked = (n == 1 && resp[0] == SAS_MACHINE_ADDRESS);
+    bool acked = (n == 1 && resp[0] == g_machine_id);
     if (!acked) ESP_LOGW(TAG, "LP 0x%02X: no ACK (n=%d)", sas_cmd, (int)n);
     return acked;
 }
@@ -191,7 +192,7 @@ static void execute_aft_command(const ServerCommand* cmd) {
                                 ? AFT_TYPE_CASHABLE
                                 : AFT_TYPE_RESTRICTED;
 
-    size_t frame_len = sas_build_lp_aft(frame, SAS_MACHINE_ADDRESS,
+    size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
                                          transfer_code, transfer_type,
                                          cmd->amount, cmd->txn_id);
     sas_send_frame(frame, frame_len, false);
@@ -226,7 +227,7 @@ static void recover_pending_aft() {
 
     // Interrogate the machine to see if it already received the funds
     uint8_t frame[32], resp[32];
-    size_t frame_len = sas_build_lp_aft(frame, SAS_MACHINE_ADDRESS,
+    size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
                                          AFT_CODE_INTERROGATE, AFT_TYPE_CASHABLE,
                                          0, txn_id);
     sas_send_frame(frame, frame_len, false);
@@ -260,7 +261,7 @@ void sas_polling_task(void* pvParameters) {
     uint32_t last_coin_out = 0;
 
     // Probe address first
-    sas_build_general_poll(gp_frame, SAS_MACHINE_ADDRESS);
+    sas_build_general_poll(gp_frame, g_machine_id);
 
     // Check for pending transaction from previous power cycle
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -345,7 +346,7 @@ void sas_polling_task(void* pvParameters) {
                 s_state = SLOT_STATE_HANDPAY;
                 ESP_LOGW(TAG, "HANDPAY pending – fetching amount");
                 {
-                    size_t hp_len = sas_build_lp_handpay(lp_frame, SAS_MACHINE_ADDRESS);
+                    size_t hp_len = sas_build_lp_handpay(lp_frame, g_machine_id);
                     sas_send_frame(lp_frame, hp_len, false);
                     size_t hn = sas_receive(resp_buf, sizeof(resp_buf));
                     if (hn > 0) {
@@ -370,7 +371,7 @@ void sas_polling_task(void* pvParameters) {
         if (++meter_tick >= 5) {  // every 5 cycles (~200ms)
             meter_tick = 0;
 
-            size_t cr_len = sas_build_lp_credits(lp_frame, SAS_MACHINE_ADDRESS);
+            size_t cr_len = sas_build_lp_credits(lp_frame, g_machine_id);
             sas_send_frame(lp_frame, cr_len, false);
             n = sas_receive(resp_buf, sizeof(resp_buf));
             if (n > 0) {
@@ -383,7 +384,7 @@ void sas_polling_task(void* pvParameters) {
         if (++meters_tick >= 25) {  // every 25 cycles (~1s)
             meters_tick = 0;
 
-            size_t m_len = sas_build_lp_meters(lp_frame, SAS_MACHINE_ADDRESS);
+            size_t m_len = sas_build_lp_meters(lp_frame, g_machine_id);
             sas_send_frame(lp_frame, m_len, false);
             n = sas_receive(resp_buf, sizeof(resp_buf));
             if (n > 0) {

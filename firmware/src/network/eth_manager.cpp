@@ -8,6 +8,7 @@
 // =============================================================
 #include "eth_manager.h"
 #include "../../include/config.h"
+#include "../machine_config.h"
 
 #include <ETH.h>
 #include <WiFi.h>       // WiFi.onEvent() is the generic network event registrar
@@ -26,14 +27,15 @@ static void eth_event_handler(WiFiEvent_t event) {
     switch (event) {
         case ARDUINO_EVENT_ETH_START:
             ESP_LOGI(TAG, "ETH started");
-            ETH.setHostname(MQTT_CLIENT_ID);
+            ETH.setHostname(g_mqtt_client_id);
             // Static IP must be configured here (after netif is created by ETH.begin()).
             // Calling ETH.config() before ETH.begin() is a no-op for SPI Ethernet (DM9051)
             // because _eth_handle is null until ETH.begin() initialises the driver.
-            ETH.config(IPAddress(ETH_STATIC_IP),
+            ETH.config(g_eth_static_ip,
                        IPAddress(ETH_STATIC_GW),
                        IPAddress(ETH_STATIC_MASK));
-            ESP_LOGI(TAG, "Static IP configured: 192.168.100.200/23");
+            ESP_LOGI(TAG, "Static IP configured: %s/23",
+                     g_eth_static_ip.toString().c_str());
             break;
 
         case ARDUINO_EVENT_ETH_CONNECTED:
