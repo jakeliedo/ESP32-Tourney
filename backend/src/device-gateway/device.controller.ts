@@ -1,6 +1,6 @@
 import { Controller, Post, Patch, Param, Body } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, Not } from 'typeorm';
 import { MqttGatewayService } from './mqtt-gateway.service';
 import { MachineEntity, MachineStatus } from '../database/entities/machine.entity';
 import { TournamentEntity, TournamentStatus } from '../database/entities/tournament.entity';
@@ -31,20 +31,24 @@ export class DeviceController {
   @Post('aft-in-all')
   async aftInAll(@Body() body: { amount: number }) {
     const amount = Math.floor(body.amount ?? 0);
-    const list = await this.machines.find();
+    // Only send to non-offline machines; avoids queuing stale AFT commands
+    // in Mosquitto that fire when an offline machine reconnects later.
+    const list = await this.machines.find({ where: { status: Not(MachineStatus.OFFLINE) } });
 
     list.forEach(m =>
       this.mqtt.sendCommand(m.machine_id, { type: 'AFT_PUMP' as const, amount }),
     );
 
-    await this.machines
-      .createQueryBuilder()
-      .update()
-      .set({ credits: () => `credits + ${amount}` })
-      .execute();
+    if (list.length) {
+      const ids = list.map(m => m.machine_id);
+      await this.machines
+        .createQueryBuilder()
+        .update()
+        .set({ credits: () => `credits + ${amount}` })
+        .where('machine_id IN (:...ids)', { ids })
+        .execute();
+    }
 
-    // Immediately push updated scores to the leaderboard so operators
-    // see feedback without waiting for MQTT telemetry round-trip.
     await this.pushLeaderboard({ creditDelta: amount });
 
     return { ok: true, count: list.length };
@@ -52,17 +56,21 @@ export class DeviceController {
 
   @Post('aft-out-all')
   async aftOutAll() {
-    const list = await this.machines.find();
+    const list = await this.machines.find({ where: { status: Not(MachineStatus.OFFLINE) } });
 
     list.forEach(m =>
       this.mqtt.sendCommand(m.machine_id, { type: 'AFT_WITHDRAW' as const, amount: 0 }),
     );
 
-    await this.machines
-      .createQueryBuilder()
-      .update()
-      .set({ credits: 0 })
-      .execute();
+    if (list.length) {
+      const ids = list.map(m => m.machine_id);
+      await this.machines
+        .createQueryBuilder()
+        .update()
+        .set({ credits: 0 })
+        .where('machine_id IN (:...ids)', { ids })
+        .execute();
+    }
 
     await this.pushLeaderboard({ resetToZero: true });
 

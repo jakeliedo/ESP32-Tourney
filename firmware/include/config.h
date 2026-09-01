@@ -65,6 +65,9 @@
 #define MQTT_BROKER_PORT  1883
 #define MQTT_USER         "esp32"
 #define MQTT_PASS         "changeme"
+// Override PubSubClient default (15s). Mosquitto fires LWT after 1.5× this value.
+// 5s keepalive → LWT in ~7.5s after hard disconnect.
+#define MQTT_KEEPALIVE    5
 
 // ──────────────────────────────────────────────────────────────
 // FreeRTOS Task Stack Sizes

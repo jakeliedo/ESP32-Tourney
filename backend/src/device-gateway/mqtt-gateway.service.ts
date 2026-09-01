@@ -101,10 +101,14 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
 
     if (channel === 'status') {
       const isOnline = payload.toString() === 'online';
+      const newStatus = isOnline ? MachineStatus.ONLINE : MachineStatus.OFFLINE;
       await this.machines.upsert(
-        { machine_id: machineId, status: isOnline ? MachineStatus.ONLINE : MachineStatus.OFFLINE },
+        { machine_id: machineId, status: newStatus },
         ['machine_id'],
       );
+
+      // Broadcast status change immediately so frontend doesn't wait for next poll cycle.
+      this.leaderboard.broadcastMachineUpdate(machineId, { status: newStatus });
 
       // When machine goes offline, remove it from the active tournament leaderboard
       // and broadcast the updated (possibly empty) rankings immediately.

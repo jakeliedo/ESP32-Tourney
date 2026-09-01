@@ -81,7 +81,13 @@ export default function App() {
     s.on('machine_update', (data: any) => {
       setMachines(prev => prev.map(m =>
         m.machine_id === data.machineId
-          ? { ...m, credits: data.credits, coin_in: data.coin_in, coin_out: data.coin_out }
+          ? {
+              ...m,
+              credits:  data.credits  ?? m.credits,
+              coin_in:  data.coin_in  ?? m.coin_in,
+              coin_out: data.coin_out ?? m.coin_out,
+              status:   data.status   ?? m.status,
+            }
           : m,
       ));
     });

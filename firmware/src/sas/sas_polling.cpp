@@ -42,6 +42,19 @@
 
 static const char* TAG = "SAS_POLL";
 
+static const char* exc_name(uint8_t exc) {
+    switch (exc) {
+        case 0x11: return "Slot door OPENED";
+        case 0x12: return "Slot door CLOSED";
+        case 0x26: return "Cashout button pressed";
+        case 0x27: return "Reel spin begin (game started)";
+        case 0x44: return "Handpay pending";
+        case 0x4C: return "Cashout ticket printed";
+        case 0x67: return "AFT transfer complete";
+        default:   return "Unknown";
+    }
+}
+
 // Shared inter-task queues (defined here, declared extern in header)
 QueueHandle_t g_command_queue = NULL;
 QueueHandle_t g_report_queue  = NULL;
@@ -203,15 +216,20 @@ static void execute_aft_command(const ServerCommand* cmd) {
         if (aft.valid) {
             if (aft.status_code == AFT_STATUS_SUCCESS) {
                 nvs_clear_pending_txn();
-                ESP_LOGI(TAG, "AFT success: %lu credits, txn=%s",
+                ESP_LOGI(TAG, "AFT OK: transferred %lu credits  txn=%s",
                          (unsigned long)aft.transfer_amount, cmd->txn_id);
             } else {
-                ESP_LOGW(TAG, "AFT status=0x%02X – retaining pending NVS entry",
-                         aft.status_code);
+                ESP_LOGW(TAG, "AFT FAIL: status=0x%02X  txn=%s",
+                         aft.status_code, cmd->txn_id);
             }
             report_event(SAS_EXC_AFT_TRANSFER_DONE, 0, 0, 0,
                          aft.status_code, cmd->txn_id);
+        } else {
+            ESP_LOGW(TAG, "AFT: response CRC/parse error  n=%d  txn=%s",
+                     (int)n, cmd->txn_id);
         }
+    } else {
+        ESP_LOGW(TAG, "AFT: no response from machine (n=0)  txn=%s", cmd->txn_id);
     }
 }
 
@@ -221,6 +239,13 @@ static void recover_pending_aft() {
     char     txn_id[21] = {0};
     uint32_t amount     = 0;
     if (!nvs_load_pending_txn(txn_id, &amount)) return;
+
+    // Stale/empty entry from a previous test or incomplete write — discard.
+    if (txn_id[0] == '\0' || amount == 0) {
+        nvs_clear_pending_txn();
+        ESP_LOGI(TAG, "Cleared stale NVS pending entry (empty txn_id or amount=0)");
+        return;
+    }
 
     ESP_LOGW(TAG, "Recovering pending AFT txn=%s amount=%lu", txn_id,
              (unsigned long)amount);
@@ -275,7 +300,13 @@ void sas_polling_task(void* pvParameters) {
         if (xQueueReceive(g_command_queue, &cmd, 0) == pdTRUE) {
             switch (cmd.cmd_type) {
                 case CMD_AFT_PUMP:
+                    ESP_LOGI(TAG, "AFT IN  recv: amount=%lu credits  txn=%s",
+                             (unsigned long)cmd.amount, cmd.txn_id);
+                    execute_aft_command(&cmd);
+                    break;
                 case CMD_AFT_WITHDRAW:
+                    ESP_LOGI(TAG, "AFT OUT recv: amount=%lu credits  txn=%s",
+                             (unsigned long)cmd.amount, cmd.txn_id);
                     execute_aft_command(&cmd);
                     break;
                 case CMD_LOCK:
@@ -332,7 +363,7 @@ void sas_polling_task(void* pvParameters) {
             case SAS_EXC_NO_ACTIVITY:
                 if (s_state == SLOT_STATE_OFFLINE || s_state == SLOT_STATE_INIT) {
                     s_state = SLOT_STATE_IDLE;
-                    ESP_LOGI(TAG, "Machine online, state → IDLE");
+                    ESP_LOGI(TAG, "Machine online → IDLE");
                 }
                 break;
 
@@ -340,11 +371,11 @@ void sas_polling_task(void* pvParameters) {
                 if (s_state == SLOT_STATE_IDLE || s_state == SLOT_STATE_TOURNAMENT_LOCKED) {
                     s_state = SLOT_STATE_PLAYING;
                 }
+                ESP_LOGI(TAG, "EXC 0x27: Reel spin begin (game started)");
                 break;
 
             case SAS_EXC_HANDPAY_PENDING:
                 s_state = SLOT_STATE_HANDPAY;
-                ESP_LOGW(TAG, "HANDPAY pending – fetching amount");
                 {
                     size_t hp_len = sas_build_lp_handpay(lp_frame, g_machine_id);
                     sas_send_frame(lp_frame, hp_len, false);
@@ -352,15 +383,20 @@ void sas_polling_task(void* pvParameters) {
                     if (hn > 0) {
                         SasHandpayResponse hp = sas_parse_handpay(resp_buf, hn);
                         if (hp.valid) {
+                            ESP_LOGW(TAG, "EXC 0x44: HANDPAY pending – amount=%lu ($%.2f)",
+                                     (unsigned long)hp.handpay_amount,
+                                     hp.handpay_amount / 100.0f);
                             report_event(exception, hp.handpay_amount, 0, 0, 0, NULL);
                         }
+                    } else {
+                        ESP_LOGW(TAG, "EXC 0x44: HANDPAY pending – no amount response");
                     }
                 }
                 break;
 
             default:
-                // Report any other exception to the server
                 if (exception != SAS_EXC_NO_ACTIVITY) {
+                    ESP_LOGI(TAG, "EXC 0x%02X: %s", exception, exc_name(exception));
                     report_event(exception, last_credits, last_coin_in, last_coin_out, 0, NULL);
                 }
                 break;
@@ -376,7 +412,13 @@ void sas_polling_task(void* pvParameters) {
             n = sas_receive(resp_buf, sizeof(resp_buf));
             if (n > 0) {
                 SasCreditResponse cr = sas_parse_credits(resp_buf, n);
-                if (cr.valid) last_credits = cr.credits;
+                if (cr.valid && cr.credits != last_credits) {
+                    int32_t delta = (int32_t)cr.credits - (int32_t)last_credits;
+                    ESP_LOGI(TAG, "Credits: %lu (%+ld)  $%.2f",
+                             (unsigned long)cr.credits, (long)delta,
+                             cr.credits / 100.0f);
+                    last_credits = cr.credits;
+                }
             }
         }
 
@@ -390,6 +432,12 @@ void sas_polling_task(void* pvParameters) {
             if (n > 0) {
                 SasMetersResponse mr = sas_parse_meters(resp_buf, n);
                 if (mr.valid) {
+                    if (mr.coin_in != last_coin_in || mr.coin_out != last_coin_out) {
+                        ESP_LOGI(TAG, "Meters: coin_in=%lu ($%.2f)  coin_out=%lu ($%.2f)  played=%lu",
+                                 (unsigned long)mr.coin_in,  mr.coin_in  / 100.0f,
+                                 (unsigned long)mr.coin_out, mr.coin_out / 100.0f,
+                                 (unsigned long)mr.games_played);
+                    }
                     last_coin_in  = mr.coin_in;
                     last_coin_out = mr.coin_out;
                     report_event(SAS_EXC_NO_ACTIVITY, last_credits,
