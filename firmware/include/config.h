@@ -55,7 +55,15 @@
 // ──────────────────────────────────────────────────────────────
 // Network / MQTT
 // ──────────────────────────────────────────────────────────────
-#define MQTT_BROKER_HOST  "192.168.1.100"
+
+// Static IP (SF110D-16 is unmanaged – no DHCP server).
+// Change per machine. Must be in same /23 subnet as broker PC.
+// Use comma-separated octets so IPAddress(ETH_STATIC_IP) compiles directly.
+#define ETH_STATIC_IP    192, 168, 100, 200
+#define ETH_STATIC_GW    192, 168, 100,   1
+#define ETH_STATIC_MASK  255, 255, 254,   0
+
+#define MQTT_BROKER_HOST  "192.168.100.69"
 #define MQTT_BROKER_PORT  1883
 #define MQTT_CLIENT_ID    "GMI-Machine-01"
 #define MQTT_USER         "esp32"

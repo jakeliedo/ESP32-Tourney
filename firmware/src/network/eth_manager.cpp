@@ -27,6 +27,13 @@ static void eth_event_handler(WiFiEvent_t event) {
         case ARDUINO_EVENT_ETH_START:
             ESP_LOGI(TAG, "ETH started");
             ETH.setHostname(MQTT_CLIENT_ID);
+            // Static IP must be configured here (after netif is created by ETH.begin()).
+            // Calling ETH.config() before ETH.begin() is a no-op for SPI Ethernet (DM9051)
+            // because _eth_handle is null until ETH.begin() initialises the driver.
+            ETH.config(IPAddress(ETH_STATIC_IP),
+                       IPAddress(ETH_STATIC_GW),
+                       IPAddress(ETH_STATIC_MASK));
+            ESP_LOGI(TAG, "Static IP configured: 192.168.100.200/23");
             break;
 
         case ARDUINO_EVENT_ETH_CONNECTED:
@@ -60,7 +67,6 @@ bool eth_manager_init() {
     WiFi.onEvent(eth_event_handler);
 
     // Begin DM9051 via SPI – Arduino Core v3.x ETH.h API
-    // DM9051 acts as MAC/PHY only; lwIP handles TCP/IP stack
     // Signature: begin(type, phy_addr, cs, irq, rst, spi_host, sck, miso, mosi, spi_freq_mhz)
     ETH.begin(ETH_PHY_DM9051,
               /* phy_addr     */ 1,
