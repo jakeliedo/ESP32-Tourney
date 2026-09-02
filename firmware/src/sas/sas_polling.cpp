@@ -16,6 +16,10 @@
 //  - CRC-16 validated on every Long Poll response
 //  - State machine tracks INIT/IDLE/PLAYING/TOURNAMENT_LOCKED/HANDPAY/OFFLINE
 //  - Retries up to SAS_MAX_RETRIES before declaring machine offline
+//  - Every raw byte sent/received on the SAS UART is hex-dumped to the
+//    USB debug console (UART0, `pio device monitor`) via sas_send_frame()/
+//    sas_receive() below, gated by SAS_LOG_RAW_FRAMES so it can be turned
+//    off later with a single build_flags define without touching this file.
 //
 // NOTE: ESP32-C3 is single-core – this task shares Core 0 with the
 // MQTT Network Task. Isolation comes from FreeRTOS priority (this
@@ -41,6 +45,30 @@
 #include <string.h>
 
 static const char* TAG = "SAS_POLL";
+
+// Raw TX/RX hex dump of every byte on the SAS UART, printed to the
+// USB debug console. Default ON for hardware bring-up with a real
+// machine; override with -DSAS_LOG_RAW_FRAMES=0 in platformio.ini
+// once the link is confirmed working, since a line per poll cycle
+// (every 40ms) is a lot of console traffic to leave on forever.
+#ifndef SAS_LOG_RAW_FRAMES
+#define SAS_LOG_RAW_FRAMES 1
+#endif
+
+#if SAS_LOG_RAW_FRAMES
+static void hex_dump(const char* label, const uint8_t* data, size_t len) {
+    if (len == 0) {
+        ESP_LOGI(TAG, "%s: (no data)", label);
+        return;
+    }
+    char buf[3 * 64 + 1];
+    size_t pos = 0;
+    for (size_t i = 0; i < len && i < 64 && pos + 3 < sizeof(buf); i++) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%02X ", data[i]);
+    }
+    ESP_LOGI(TAG, "%s (%u bytes): %s", label, (unsigned)len, buf);
+}
+#endif
 
 static const char* exc_name(uint8_t exc) {
     switch (exc) {
@@ -99,6 +127,9 @@ static void sas_send_byte(uint8_t byte, bool is_address) {
  */
 static void sas_send_frame(const uint8_t* frame, size_t len, bool general_poll) {
     uart_flush(SAS_UART_NUM);
+#if SAS_LOG_RAW_FRAMES
+    hex_dump("SAS TX", frame, len);
+#endif
     for (size_t i = 0; i < len; i++) {
         // General Poll: all bytes are address bytes
         bool is_addr = general_poll ? true : (i == 0);
@@ -119,6 +150,13 @@ static size_t sas_receive(uint8_t* buf, size_t max_len) {
                                 max_len - received, pdMS_TO_TICKS(2));
         if (n > 0) received += n;
     }
+#if SAS_LOG_RAW_FRAMES
+    if (received > 0) {
+        hex_dump("SAS RX", buf, received);
+    } else {
+        ESP_LOGI(TAG, "SAS RX: no response (timeout %dms)", SAS_RESPONSE_TIMEOUT);
+    }
+#endif
     return received;
 }
 
@@ -412,12 +450,16 @@ void sas_polling_task(void* pvParameters) {
             n = sas_receive(resp_buf, sizeof(resp_buf));
             if (n > 0) {
                 SasCreditResponse cr = sas_parse_credits(resp_buf, n);
-                if (cr.valid && cr.credits != last_credits) {
-                    int32_t delta = (int32_t)cr.credits - (int32_t)last_credits;
-                    ESP_LOGI(TAG, "Credits: %lu (%+ld)  $%.2f",
-                             (unsigned long)cr.credits, (long)delta,
-                             cr.credits / 100.0f);
-                    last_credits = cr.credits;
+                if (cr.valid) {
+                    if (cr.credits != last_credits) {
+                        int32_t delta = (int32_t)cr.credits - (int32_t)last_credits;
+                        ESP_LOGI(TAG, "Credits: %lu (%+ld)  $%.2f",
+                                 (unsigned long)cr.credits, (long)delta,
+                                 cr.credits / 100.0f);
+                        last_credits = cr.credits;
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Credits poll: response CRC/parse error (n=%d)", (int)n);
                 }
             }
         }
@@ -442,6 +484,8 @@ void sas_polling_task(void* pvParameters) {
                     last_coin_out = mr.coin_out;
                     report_event(SAS_EXC_NO_ACTIVITY, last_credits,
                                  last_coin_in, last_coin_out, 0, NULL);
+                } else {
+                    ESP_LOGW(TAG, "Meters poll: response CRC/parse error (n=%d)", (int)n);
                 }
             }
         }
