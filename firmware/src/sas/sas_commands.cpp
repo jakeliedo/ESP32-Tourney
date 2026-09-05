@@ -39,17 +39,6 @@ size_t sas_build_lp_simple(uint8_t* buf, uint8_t address, uint8_t cmd) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// General Poll (2 bytes, no CRC)
-// Format: [ADDR] [ADDR]  (address byte sent twice, both with MARK parity)
-// ─────────────────────────────────────────────────────────────
-
-size_t sas_build_general_poll(uint8_t* buf, uint8_t address) {
-    buf[0] = address;
-    buf[1] = address;
-    return 2;
-}
-
-// ─────────────────────────────────────────────────────────────
 // Long Poll 1A – Send Current Credit Meter
 // Request:  [ADDR(MARK)] [0x1A(SPACE)] [CRC_L] [CRC_H]
 // Response: [ADDR] [0x1A] [BCD_4_BYTES] [CRC_L] [CRC_H]

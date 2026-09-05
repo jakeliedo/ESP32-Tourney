@@ -68,7 +68,7 @@ React Frontends
 | Frontend control-panel | ✅ Hoàn chỉnh | Tabbed panel: Machines / History / Players |
 | Frontend leaderboard (:5174) | ✅ Hoàn chỉnh | Xóa máy offline khỏi bảng |
 | TypeORM migrations | ⚠️ Chưa có | Dev dùng `synchronize: true` |
-| SAS end-to-end với máy slot thật | ⏳ Chưa test | Cần cắm RS232, boot log firmware đã OK |
+| SAS end-to-end với máy slot thật | ✅ Đã test thành công (2026-09-05) | General Poll + Credits (LP 0x1A) đọc đúng, CRC valid. Xem mục **"Nhật ký debug SAS với máy thật (2026-09)"** phía dưới để biết toàn bộ lỗi đã gặp và cách sửa. Meters (LP 0xAF) vẫn chưa có phản hồi từ máy — xem "Việc còn tồn đọng" cuối mục đó. |
 
 ---
 
@@ -166,7 +166,7 @@ pio run -e eth01evo
 pio run -e eth01evo --target upload
 
 # Serial monitor
-pio device monitor -e eth01evo   # 115200 baud, COM4
+pio device monitor -e eth01evo   # 115200 baud, cổng COM thật của FTDI (đã dùng COM7 khi debug SAS 2026-09; đổi theo máy, xem Device Manager)
 
 # LED smoke test
 pio run -e led-test --target upload
@@ -280,7 +280,7 @@ Board WT32-ETH01-Evo có 2 hàng header song song (J3 trái, J6 phải), mỗi h
   1 ── ESP_EN (Reset)    C3_TX0 (GPIO1)  ── 1   ← UART0 TX (flashing/monitor)
   2 ── GND               C3_RX0 (GPIO3)  ── 2   ← UART0 RX (flashing/monitor)
   3 ── +3V3              C3_IO9 (GPIO9)  ── 3   ← BOOT MODE PIN
-  4 ── GND               (NC)            ── 4
+  4 ── ESP_EN (Reset)    (NC)            ── 4
   5 ── EXT_CFG           C3_IO7 (GPIO7)  ── 5   [DM9051 SCLK – không dùng]
   6 ── EXT_485_DE        C3_IO6 (GPIO6)  ── 6   [DM9051 RST – không dùng]
   7 ── EXT_RXD (GPIO5)   C3_IO5 (GPIO5)  ── 7   ← LED RED (D1)
@@ -293,6 +293,8 @@ Board WT32-ETH01-Evo có 2 hàng header song song (J3 trái, J6 phải), mỗi h
 ```
 
 > **Lưu ý:** GPIO3 xuất hiện cả ở J6-2 (C3_RX0 UART0) và J6-9 (C3_IO3) — đây là cùng một pin, share giữa UART0 debug và DM9051 MISO (internal trace). Không dùng J6-9 khi đang flash.
+>
+> **Sửa lỗi tài liệu (2026-09-04):** J3-4 trước đây ghi nhầm là GND — theo datasheet gốc (`hardware/WT32-ETH01-EVO-Datasheet-V2.0EN.pdf`, Extension Interface A) và sơ đồ mạch, **J3-4 thực chất là ESP_EN thứ hai (cùng net với J3-1)**. Có thể dùng J3-1 hoặc J3-4 để pulse EN khi vào boot mode — tương đương nhau về điện, thử chân còn lại nếu một chân tiếp xúc kém. Các pin J3-9 → J3-13 chưa được đối chiếu lại kỹ với datasheet, cần xác minh vật lý (đo continuity) trước khi tin tưởng hoàn toàn.
 
 ---
 
@@ -319,6 +321,8 @@ Bước 4: Chạy lệnh upload NGAY:
 
 **Dấu hiệu vào boot mode thành công:** esptool in `Connecting....` rồi `Connected to ESP32-C3`.
 **Dấu hiệu thất bại:** `No serial data received` → lặp lại từ bước 1, kiểm tra dây jumper tiếp xúc tốt.
+
+> **Phát hiện (2026-09-04): pulse EN (bước 2) không đáng tin cậy trên board này.** Đã xác minh trực tiếp bằng cách nghe COM7 trong lúc pulse EN — uptime counter của firmware **không hề reset**, chứng tỏ pulse EN qua J3-1 nhiều lần không thực sự kéo được EN xuống GND (khả năng do tiếp xúc jumper kém, không phải sai chân). **Quy trình thay thế đã xác nhận hoạt động ổn định:** thay vì pulse EN ở bước 2, **rút và cắm lại nguồn cấp cho board (power-cycle toàn bộ)** trong khi vẫn giữ GPIO9→GND, giữ thêm ~1-2s sau khi có nguồn lại rồi mới thả GPIO9. Ưu tiên dùng cách này thay vì pulse EN nếu upload liên tục báo `No serial data received`. Cũng lưu ý: sau khi flash xong, esptool in `Hard resetting via RTS pin` nhưng dòng này **không có tác dụng thật** trên board (không có auto-reset circuit) — cần power-cycle thêm 1 lần nữa (KHÔNG giữ GPIO9 lần này) để board boot vào firmware vừa nạp.
 
 ---
 
@@ -399,6 +403,78 @@ Máy slot GND ─────┤
 
 ---
 
+## Nhật ký debug SAS với máy thật (2026-09)
+
+Phiên làm việc 2026-09-04 → 2026-09-05: lần đầu đấu nối và đọc dữ liệu SAS từ **máy slot thật** (trước đó chỉ test loopback/giả lập). Ghi lại đầy đủ ở đây vì hành trình debug dài, nhiều lần đoán sai hướng — mục đích để **lần sau (máy khác, hoặc cùng máy) không phải lặp lại từ đầu.**
+
+### Tóm tắt kết quả cuối cùng
+
+✅ General Poll và Credits (LP 0x1A) đọc đúng, ổn định, CRC valid 100%.
+⚠️ Meters (LP 0xAF) chưa có phản hồi từ máy này — xem "Việc còn tồn đọng".
+🔑 **Nguyên nhân gốc của phần lớn thời gian debug: dây GND trong cáp RS232 nối V0259 ↔ máy slot bị sai/thiếu.** Không phải lỗi firmware, không phải điện áp nguồn, không phải framing UART — dù cả 3 thứ đó cũng có lỗi thật sự cần sửa (xem bên dưới) và **đã sửa xong**, chúng không phải nguyên nhân chính khiến không đọc được dữ liệu.
+
+### 3 lỗi firmware đã tìm thấy và sửa (xác nhận qua unit test + hardware thật)
+
+**1. Bảng tên exception (`exc_name()` trong `sas_polling.cpp`) sai 5/7 mã**
+
+Bảng cũ chỉ đúng ngẫu nhiên 2 mã (0x11, 0x12 — cửa mở/đóng), 5 mã còn lại sai hoàn toàn khi đối chiếu với **Appendix A, tài liệu gốc SAS 6.02** (IGT/GSA, do người dùng cung cấp trực tiếp trong phiên chat):
+
+| Mã | Tên cũ (SAI) | Tên đúng theo Appendix A |
+|---|---|---|
+| 0x26 | "Cashout button pressed" | *(không tồn tại trong bảng chuẩn — mã cashout thật là 0x66)* |
+| 0x27 | "Reel spin begin (game started)" | "Cashbox full detected" |
+| 0x44 | "Handpay pending" | "Reel 4 tilt" (handpay pending thật là 0x51) |
+| 0x4C | "Cashout ticket printed" | "$100.00 bill accepted" (ticket printed thật là 0x3D) |
+| 0x67 | "AFT transfer complete" | "Ticket has been inserted" (AFT complete thật là 0x69) |
+
+Đã viết lại toàn bộ bảng theo Appendix A, mở rộng thêm ~15 mã (AC power, general tilt, handpay reset, AFT host-cashout request, game locked 0x6F...). **Bài học: đừng đoán mã exception nếu chưa đối chiếu tài liệu gốc — bảng cũ đã tồn tại "đúng ngẫu nhiên" đủ lâu để trông đáng tin, dù thực chất sai gần hết.**
+
+**2. Credits/Meters/AFT/Handpay luôn bị cắt cụt phản hồi (timeout quá ngắn)**
+
+`SAS_RESPONSE_TIMEOUT` (20ms, dùng chung cho mọi giao dịch) quá ngắn cho các Long Poll trả về nhiều byte. Đo trực tiếp trên máy thật: Credits (LP 0x1A, cần đủ 8 byte) luôn bị cắt ở 3-4 byte, không bao giờ qua được CRC. Tách riêng `SAS_LONG_POLL_TIMEOUT = 100ms` cho Credits/Meters/AFT/Handpay (General Poll vẫn giữ 20ms vì chạy mỗi 40ms/lần, không có nhiều slack). Worst-case tính theo spec: 20ms response window + tối đa 5ms/byte × 15 byte (Meters, khung dài nhất) = 95ms → 100ms đủ dư.
+
+**3. General Poll dùng framing sai chuẩn, khiến máy chỉ echo lại chứ không báo cáo exception thật**
+
+Code cũ gửi địa chỉ máy **2 lần liên tiếp** với bit9=1 (MARK) cả 2 byte — không đúng chuẩn SAS (chuẩn là 1 byte địa chỉ duy nhất). Trên máy thật, cách này khiến máy **echo lại chính xác byte mình gửi** thay vì trả về exception code — capture được hàng nghìn lần liên tiếp giống hệt nhau, kể cả khi chủ động rút/đóng cửa máy (không có gì thay đổi).
+
+Đã tham khảo dự án **SASPyTourney** (github.com/jakeliedo/SASpyTourney, dùng thư viện cộng đồng `saspy` — github.com/zacharytomlinson/saspy) mà người dùng xác nhận đã chạy thành công thực tế trước đây. Phát hiện cơ chế framing thật của SAS trên phần cứng thật khác hẳn lý thuyết sách vở:
+
+- **General Poll:** gửi 2 byte thô `[SAS_POLL_ADDRESS(0x82), 0x80 | địa_chỉ_máy]`, với **KHÔNG parity + 2 stop-bit** (không dùng bit9 MARK/SPACE như Long Poll).
+- **Long Poll:** thêm "preamble" 2 byte MARK `[SAS_POLL_ADDRESS, địa_chỉ_máy]` TRƯỚC cmd/data/CRC (SPACE), thay vì chỉ 1 byte địa chỉ MARK như code cũ.
+
+Copy machine y hệt cách pyserial làm (PC) sang ESP32 **chưa đủ** — thêm 1 lỗi nữa phải tự tìm ra: cấu hình "parity NONE + 2 stop-bit" khi ĐỌC phản hồi General Poll khiến ESP32 UART hardware coi là lỗi framing (vì byte phản hồi thật có bit9=0, không phải "2 bit stop=1" như ESP32 UART kỳ vọng) — PC dễ dãi hơn với lỗi này nên kỹ thuật gốc "chạy được" trên PC. Sửa: chuyển sang parity cố định (EVEN, không quan trọng giá trị) + 1 stop-bit khi đọc, khớp đúng khung 11-bit thật của SAS.
+
+**Lưu ý quan trọng: dù đã sửa đúng cả 2 lỗi trên (framing General Poll + đọc phản hồi), dữ liệu vẫn nhiễu (xem phần debug phần cứng bên dưới) cho tới khi thay cáp RS232 đúng dây GND — tức đây thực sự là 2 lỗi ĐỘC LẬP, cả hai đều cần sửa, không lỗi nào "che" lỗi kia.**
+
+### Hành trình debug phần cứng (đường dây RS232 → máy slot)
+
+Sau khi sửa 3 lỗi firmware trên, General Poll vẫn chỉ trả về echo của chính byte gửi đi (từ "01" khi dùng framing cũ, sang "82" khi dùng framing mới — luôn đúng bằng byte đầu tiên vừa TX). Thứ tự loại trừ nguyên nhân, **theo đúng trình tự đã làm, để lần sau không mất công thử lại các hướng đã loại trừ:**
+
+1. **Rút dây RS232 khỏi máy (V0259 để lơ lửng):** im lặng hoàn toàn (no response), không còn echo. → **Loại trừ:** không phải lỗi loopback nội bộ trong V0259/board — echo chỉ xảy ra khi có kết nối thật tới máy.
+2. **Đổi nguồn V0259 từ 3.3V sang 5V, đo lại điện áp TX (hở mạch, RS232 side):** đo được **-5.7V y hệt cả hai mức nguồn**. → **Loại trừ:** điện áp nguồn cấp (3.3V vs 5V) không phải nguyên nhân — driver RS232 bão hòa ở cùng mức áp bất kể nguồn.
+3. **Đảo dây TXD/RXD giữa V0259 và máy:** hiện tượng echo biến mất hoàn toàn, thay bằng phần lớn im lặng + thỉnh thoảng nhiễu dạng số gần `0xFF` (`F0, FF, E0, F1, FD, F9, E1`...). → Xác nhận hướng dây "đảo" đúng hơn hướng cũ, nhưng vẫn chưa sạch.
+4. **Đo điện áp khi đã nối lại máy (có tải thật):** RX = **-7.3V**, TX = **-5.5V** — cả hai đều là mức RS232 hợp lệ, ổn định, đúng chuẩn (mark/idle). → **Loại trừ:** không phải floating/hở mạch, không phải thiếu điện áp — máy THẬT SỰ đang chủ động phát tín hiệu RS232 hợp lệ vào V0259.
+5. **Nhưng dữ liệu số vẫn nhiễu dù điện áp DC tốt** → sửa framing UART (mục lỗi #3 ở trên: NONE-parity+2-stopbit → EVEN-parity+1-stopbit khi đọc General Poll) — build lại, test lại: **nhiễu vẫn y hệt, không đổi.** → **Loại trừ:** không phải lỗi framing UART (dù lỗi đó có thật và đã sửa đúng, nó không phải nguyên nhân của nhiễu này).
+6. **Đổi sang cáp COM/RS232 khác, đảm bảo đúng thứ tự dây (đặc biệt là GND):** → **Dữ liệu sạch hoàn toàn ngay lập tức.** General Poll ổn định ở `0x00` ("No activity", mã chuẩn), Credits trả về đủ 8 byte, CRC khớp 100%, 0 lỗi trong suốt 40 giây log.
+
+**Bài học chính:** dây GND đi kèm tín hiệu RS232 (không phải chỉ TXD/RXD) quan trọng ngang hoặc hơn cả TXD/RXD — thiếu/sai GND không gây im lặng hoàn toàn (vẫn có "tín hiệu" gì đó, dễ đánh lừa là đang debug đúng hướng), mà gây **nhiễu bit ngẫu nhiên trông giống lỗi framing/timing/echo**, khiến dễ đi sai hướng debug (nghi ngờ voltage, nghi ngờ framing UART, nghi ngờ máy chưa bật SAS...) rất lâu trước khi nghĩ tới cáp/GND. **Lần sau nếu gặp lại triệu chứng "nhiễu dạng gần 0xFF, lệch vài bit, không cố định" dù điện áp DC đo được vẫn đúng chuẩn RS232 — kiểm tra cáp/dây GND TRƯỚC, đừng lặp lại việc dò voltage/framing/wire-orientation trước.**
+
+### Cách chẩn đoán TX/RX thật trên cổng SAS của máy (không cần tin nhãn in trên connector)
+
+Mẹo hữu ích rút ra được: đo điện áp trực tiếp trên connector của máy (chưa cắm gì) —
+- Chân nào ra điện áp **âm ổn định** (khoảng -5V đến -12V) dù không tải → đó là **TX thật** của máy (driver chủ động phát, không phụ thuộc có tải).
+- Chân nào đo gần **0V** khi không tải → đó là **RX thật** của máy (chỉ nhận, không có gì chủ động kéo điện áp khi chưa nối).
+
+Không nên tin nhãn TX/RX in trên đầu nối — quy ước ghi nhãn theo góc nhìn thiết bị A hay thiết bị B rất hay gây nhầm lẫn trong RS232.
+
+### Việc còn tồn đọng
+
+- **Meters poll (LP 0xAF – "Send extended meters, alternate") không có phản hồi từ máy này**, dù Credits (LP 0x1A) và General Poll đều hoạt động tốt cùng lúc, cùng framing. Máy được nhắc tới trong tài liệu SAS 6.02 gốc ghi "distributed to Euro Games Technology LTD" — nghi ngờ đây là máy EGT, có thể không hỗ trợ đúng lệnh 0xAF hoặc cần tham số khác (game_number/denom). **Chưa thử:** các lệnh Long Poll meters cũ hơn (dải 0x0F trở xuống theo Appendix B), hoặc kiểm tra máy có yêu cầu "AFT enable"/cấu hình bổ sung trước khi trả lời 0xAF.
+- Pin J3-9 → J3-13 trên header EXT Port (xem mục Sơ đồ chân EXT Port) vẫn chưa được đối chiếu lại kỹ với datasheet — chỉ mới sửa xong J3-4.
+- Chưa kiểm tra menu operator/audit trên máy slot để xác nhận SAS address cấu hình và trạng thái "Host Controlled" — không cần thiết nữa vì đã đọc được dữ liệu thật, nhưng nếu gặp lại máy "im lặng hoàn toàn" (không phải nhiễu) ở một máy khác, đây là việc nên kiểm tra sớm.
+
+---
+
 ## Cấu hình Firmware (config.h)
 
 **Tất cả pin DM9051 là internal traces — KHÔNG chỉnh.** Chỉ thay đổi các define sau trước khi flash cho từng máy:
@@ -406,6 +482,9 @@ Máy slot GND ─────┤
 | Define | Giá trị mặc định | Ghi chú |
 |---|---|---|
 | `SAS_MACHINE_ADDRESS` | `0x01` | Địa chỉ SAS (1–127), mỗi máy khác nhau |
+| `SAS_POLL_ADDRESS` | `0x82` | **Mới (2026-09-05).** Byte "wakeup" cố định gửi trước địa chỉ máy thật trên mọi giao dịch SAS — xem mục "Nhật ký debug SAS với máy thật (2026-09)". Thử `0x80` nếu `0x82` không nhận được phản hồi trên một máy cụ thể. |
+| `SAS_RESPONSE_TIMEOUT` | `20` ms | Timeout cho General Poll (chạy mỗi chu kỳ 40ms, phải ngắn) |
+| `SAS_LONG_POLL_TIMEOUT` | `100` ms | **Mới (2026-09-05).** Timeout cho Credits/Meters/AFT/Handpay (chạy thưa hơn, có thể chờ lâu hơn). Trước đây là 35ms → luôn bị cắt cụt phản hồi thật (đo được máy cần tới ~95ms cho frame 16 byte trong trường hợp xấu nhất). |
 | `MQTT_BROKER_HOST` | `"192.168.1.100"` | IP server chạy Mosquitto |
 | `MQTT_CLIENT_ID` | `"GMI-Machine-01"` | Phải unique trên toàn broker |
 | `MQTT_TOPIC_*` | `casino/machine/01/...` | Phải khớp với machine ID |

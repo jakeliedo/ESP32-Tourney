@@ -24,3 +24,11 @@ Thumbs.db
 *.swp
 *.swo
 .vscode/settings.json
+
+# ── Logs / caches (transient) ───────────────────────────────
+*.log
+__pycache__/
+*.pyc
+
+# ── Proprietary/licensed reference docs (do not redistribute) ─
+SAS 6.02.pdf

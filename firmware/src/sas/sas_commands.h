@@ -8,7 +8,7 @@
 #include <stdbool.h>
 
 // ── SAS Command Codes ──────────────────────────────────────────
-#define SAS_CMD_GENERAL_POLL        0x00  // 2-byte address poll
+#define SAS_CMD_GENERAL_POLL        0x00  // 1-byte address poll
 #define SAS_CMD_SHUTDOWN            0x01  // Long Poll 01: Shutdown (Lock Out Play) – Type S
 #define SAS_CMD_STARTUP             0x02  // Long Poll 02: Startup (Enable Play) – Type S
 #define SAS_CMD_ENABLE_BILL         0x06  // Long Poll 06: Enable Bill Acceptor – Type S
@@ -88,13 +88,11 @@ typedef struct {
 // Each builder returns total frame length including 2 CRC bytes
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Build a 2-byte General Poll frame.
- * @param buf     Output buffer (min 2 bytes)
- * @param address SAS machine address (1–127)
- * @return frame length (always 2)
- */
-size_t sas_build_general_poll(uint8_t* buf, uint8_t address);
+// General Poll is built and sent directly in sas_polling.cpp
+// (sas_general_poll()) -- unlike Long Polls it uses a completely
+// different UART framing (no parity, 2 stop bits) confirmed against
+// SASPyTourney/saspy on real hardware, so there's no shared byte
+// layout worth factoring out here.
 
 /**
  * Build a Type-S Long Poll (short command, no data payload).

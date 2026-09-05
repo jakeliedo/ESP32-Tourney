@@ -70,15 +70,36 @@ static void hex_dump(const char* label, const uint8_t* data, size_t len) {
 }
 #endif
 
+// Verified against IGT SAS Protocol Version 6.02 (Nov 15 2005), Appendix A,
+// General Poll Exception Codes -- the earlier version of this table had
+// every entry wrong except 0x11/0x12 (guessed values, never checked
+// against the real spec). Add entries here as new codes are observed
+// on real hardware and confirmed against Appendix A.
 static const char* exc_name(uint8_t exc) {
     switch (exc) {
         case 0x11: return "Slot door OPENED";
         case 0x12: return "Slot door CLOSED";
-        case 0x26: return "Cashout button pressed";
-        case 0x27: return "Reel spin begin (game started)";
-        case 0x44: return "Handpay pending";
-        case 0x4C: return "Cashout ticket printed";
-        case 0x67: return "AFT transfer complete";
+        case 0x17: return "AC power applied";
+        case 0x18: return "AC power lost";
+        case 0x20: return "General tilt";
+        case 0x27: return "Cashbox full detected";
+        case 0x2E: return "Cashbox near full detected";
+        case 0x3C: return "Operator changed options";
+        case 0x3D: return "Cash out ticket has been printed";
+        case 0x3E: return "Handpay has been validated";
+        case 0x3F: return "Validation ID not configured";
+        case 0x44: return "Reel 4 tilt";
+        case 0x51: return "Handpay pending";
+        case 0x52: return "Handpay was reset";
+        case 0x57: return "System validation request";
+        case 0x66: return "Cash out button pressed";
+        case 0x67: return "Ticket has been inserted";
+        case 0x68: return "Ticket transfer complete";
+        case 0x69: return "AFT transfer complete";
+        case 0x6A: return "AFT request for host cashout";
+        case 0x6B: return "AFT request for host to cash out win";
+        case 0x6F: return "Game locked";
+        case 0x7C: return "Legacy bonus pay awarded";
         default:   return "Unknown";
     }
 }
@@ -122,28 +143,88 @@ static void sas_send_byte(uint8_t byte, bool is_address) {
 }
 
 /**
- * Transmit a full SAS frame. Byte[0] is the address (MARK), rest are data (SPACE).
- * For General Poll both bytes are address bytes (MARK).
+ * Transmit a Long Poll frame with the real-hardware-verified wakeup
+ * preamble (per SASPyTourney/saspy): [SAS_POLL_ADDRESS(MARK), frame[0]
+ * i.e. machine address(MARK)], then the rest of frame (cmd/data/CRC)
+ * as SPACE. A plain single MARK address byte (this firmware's earlier
+ * approach) got ignored/echoed by real machines instead of routing
+ * the poll. Always runs at 1 stop bit (restored here in case the
+ * General Poll path above left the UART at 2 stop bits).
  */
-static void sas_send_frame(const uint8_t* frame, size_t len, bool general_poll) {
+static void sas_send_frame(const uint8_t* frame, size_t len) {
+    uart_set_stop_bits(SAS_UART_NUM, UART_STOP_BITS_1);
     uart_flush(SAS_UART_NUM);
 #if SAS_LOG_RAW_FRAMES
-    hex_dump("SAS TX", frame, len);
+    uint8_t logged[34];
+    logged[0] = SAS_POLL_ADDRESS;
+    memcpy(logged + 1, frame, len < 33 ? len : 33);
+    hex_dump("SAS TX", logged, len + 1);
 #endif
-    for (size_t i = 0; i < len; i++) {
-        // General Poll: all bytes are address bytes
-        bool is_addr = general_poll ? true : (i == 0);
-        sas_send_byte(frame[i], is_addr);
+    sas_send_byte(SAS_POLL_ADDRESS, true);
+    sas_send_byte(frame[0], true);          // machine address – MARK
+    for (size_t i = 1; i < len; i++) {
+        sas_send_byte(frame[i], false);     // cmd/data/CRC – SPACE
     }
+}
+
+/**
+ * General Poll ("events poll"), per SASPyTourney/saspy real-hardware
+ * framing: NO parity bit at all (not even our usual bit9 MARK/SPACE
+ * emulation) and 2 STOP BITS, sending 2 plain 8-bit bytes:
+ * [SAS_POLL_ADDRESS, 0x80 | machine_address]. The earlier approach
+ * (bit9 MARK on a single machine-address byte, 1 stop bit) always got
+ * echoed back unchanged by the real machine instead of a genuine
+ * exception report. Returns 1 if an exception byte was read into
+ * *out_exc, 0 on timeout (no exception queued -- the normal case).
+ */
+static size_t sas_general_poll(uint8_t machine_address, uint8_t* out_exc) {
+    uart_set_parity(SAS_UART_NUM, UART_PARITY_DISABLE);
+    uart_set_stop_bits(SAS_UART_NUM, UART_STOP_BITS_2);
+    uart_flush(SAS_UART_NUM);
+
+    uint8_t frame[2] = { SAS_POLL_ADDRESS, (uint8_t)(0x80 | machine_address) };
+#if SAS_LOG_RAW_FRAMES
+    hex_dump("SAS TX(gp)", frame, 2);
+#endif
+    uart_write_bytes(SAS_UART_NUM, (const char*)frame, 2);
+    uart_wait_tx_done(SAS_UART_NUM, pdMS_TO_TICKS(10));
+
+    // Real SAS response bytes always carry bit9=0 (see sas_receive's header
+    // comment) followed by one genuine stop bit -- an 11-bit frame, same as
+    // every other SAS response on this link. 2 stop bits (matching pyserial's
+    // PARITY_NONE/STOPBITS_TWO trick 1:1) makes ESP32's UART hardware demand
+    // BOTH trailing bit-times be logic-1, but the real bit9=0 violates that
+    // and reads as a framing error on real hardware -- unlike a PC UART/driver,
+    // which tends to tolerate it. Switch to a fixed parity (value doesn't
+    // matter, we don't check the parity-error flag) + 1 stop bit before
+    // reading, matching the framing every other RX on this link already uses.
+    uart_set_parity(SAS_UART_NUM, UART_PARITY_EVEN);
+    uart_set_stop_bits(SAS_UART_NUM, UART_STOP_BITS_1);
+
+    size_t received = 0;
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SAS_RESPONSE_TIMEOUT);
+    while (received < 1 && xTaskGetTickCount() < deadline) {
+        int n = uart_read_bytes(SAS_UART_NUM, out_exc + received, 1 - received, pdMS_TO_TICKS(2));
+        if (n > 0) received += n;
+    }
+#if SAS_LOG_RAW_FRAMES
+    if (received > 0) {
+        hex_dump("SAS RX(gp)", out_exc, received);
+    } else {
+        ESP_LOGI(TAG, "SAS RX(gp): no response (timeout %dms)", SAS_RESPONSE_TIMEOUT);
+    }
+#endif
+    return received;
 }
 
 /**
  * Wait for a response from the machine with timeout.
  * Returns number of bytes read, or 0 on timeout.
  */
-static size_t sas_receive(uint8_t* buf, size_t max_len) {
+static size_t sas_receive(uint8_t* buf, size_t max_len,
+                           uint16_t timeout_ms = SAS_RESPONSE_TIMEOUT) {
     size_t received = 0;
-    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SAS_RESPONSE_TIMEOUT);
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
 
     while (received < max_len && xTaskGetTickCount() < deadline) {
         int n = uart_read_bytes(SAS_UART_NUM, buf + received,
@@ -154,7 +235,7 @@ static size_t sas_receive(uint8_t* buf, size_t max_len) {
     if (received > 0) {
         hex_dump("SAS RX", buf, received);
     } else {
-        ESP_LOGI(TAG, "SAS RX: no response (timeout %dms)", SAS_RESPONSE_TIMEOUT);
+        ESP_LOGI(TAG, "SAS RX: no response (timeout %dms)", timeout_ms);
     }
 #endif
     return received;
@@ -220,7 +301,7 @@ static bool execute_simple_command(uint8_t sas_cmd) {
     uint8_t frame[4];
     uint8_t resp[1];
     size_t frame_len = sas_build_lp_simple(frame, g_machine_id, sas_cmd);
-    sas_send_frame(frame, frame_len, false);
+    sas_send_frame(frame, frame_len);
     size_t n = sas_receive(resp, 1);
     bool acked = (n == 1 && resp[0] == g_machine_id);
     if (!acked) ESP_LOGW(TAG, "LP 0x%02X: no ACK (n=%d)", sas_cmd, (int)n);
@@ -246,8 +327,8 @@ static void execute_aft_command(const ServerCommand* cmd) {
     size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
                                          transfer_code, transfer_type,
                                          cmd->amount, cmd->txn_id);
-    sas_send_frame(frame, frame_len, false);
-    size_t n = sas_receive(resp, sizeof(resp));
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
 
     if (n > 0) {
         SasAftResponse aft = sas_parse_aft(resp, n);
@@ -293,8 +374,8 @@ static void recover_pending_aft() {
     size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
                                          AFT_CODE_INTERROGATE, AFT_TYPE_CASHABLE,
                                          0, txn_id);
-    sas_send_frame(frame, frame_len, false);
-    size_t n = sas_receive(resp, sizeof(resp));
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
     if (n > 0) {
         SasAftResponse aft = sas_parse_aft(resp, n);
         if (aft.valid && aft.status_code == AFT_STATUS_SUCCESS) {
@@ -316,15 +397,11 @@ static void recover_pending_aft() {
 void sas_polling_task(void* pvParameters) {
     ESP_LOGI(TAG, "SAS Polling Task started on Core %d", xPortGetCoreID());
 
-    uint8_t  gp_frame[2];
     uint8_t  lp_frame[8];
     uint8_t  resp_buf[32];
     uint32_t last_credits  = 0;
     uint32_t last_coin_in  = 0;
     uint32_t last_coin_out = 0;
-
-    // Probe address first
-    sas_build_general_poll(gp_frame, g_machine_id);
 
     // Check for pending transaction from previous power cycle
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -378,23 +455,16 @@ void sas_polling_task(void* pvParameters) {
         }
 
         // ── 2. General Poll to get exception code ───────────────
-        sas_send_frame(gp_frame, 2, true);
-        size_t n = sas_receive(resp_buf, 2);
+        // EGM responds with 1 exception byte if it has one queued, or
+        // stays silent (n==0) if it doesn't -- silence is the
+        // NORMAL/common case per spec, not a failure, so it must NOT
+        // drive the offline/retry counter. Offline detection instead
+        // lives on the Credits poll below, which always requires a
+        // real ACK'd, CRC-valid response.
+        uint8_t exc_byte = 0;
+        size_t n = sas_general_poll(g_machine_id, &exc_byte);
 
-        if (n == 0) {
-            s_retry_count++;
-            if (s_retry_count >= SAS_MAX_RETRIES) {
-                if (s_state != SLOT_STATE_OFFLINE) {
-                    ESP_LOGW(TAG, "Machine offline – no response");
-                    s_state = SLOT_STATE_OFFLINE;
-                }
-            }
-            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAS_POLL_INTERVAL_MS));
-            continue;
-        }
-
-        s_retry_count = 0;
-        uint8_t exception = resp_buf[0];
+        uint8_t exception = (n > 0) ? exc_byte : SAS_EXC_NO_ACTIVITY;
 
         // ── 3. Update state machine based on exception ──────────
         switch (exception) {
@@ -416,8 +486,8 @@ void sas_polling_task(void* pvParameters) {
                 s_state = SLOT_STATE_HANDPAY;
                 {
                     size_t hp_len = sas_build_lp_handpay(lp_frame, g_machine_id);
-                    sas_send_frame(lp_frame, hp_len, false);
-                    size_t hn = sas_receive(resp_buf, sizeof(resp_buf));
+                    sas_send_frame(lp_frame, hp_len);
+                    size_t hn = sas_receive(resp_buf, sizeof(resp_buf), SAS_LONG_POLL_TIMEOUT);
                     if (hn > 0) {
                         SasHandpayResponse hp = sas_parse_handpay(resp_buf, hn);
                         if (hp.valid) {
@@ -446,20 +516,29 @@ void sas_polling_task(void* pvParameters) {
             meter_tick = 0;
 
             size_t cr_len = sas_build_lp_credits(lp_frame, g_machine_id);
-            sas_send_frame(lp_frame, cr_len, false);
-            n = sas_receive(resp_buf, sizeof(resp_buf));
-            if (n > 0) {
-                SasCreditResponse cr = sas_parse_credits(resp_buf, n);
-                if (cr.valid) {
-                    if (cr.credits != last_credits) {
-                        int32_t delta = (int32_t)cr.credits - (int32_t)last_credits;
-                        ESP_LOGI(TAG, "Credits: %lu (%+ld)  $%.2f",
-                                 (unsigned long)cr.credits, (long)delta,
-                                 cr.credits / 100.0f);
-                        last_credits = cr.credits;
-                    }
-                } else {
-                    ESP_LOGW(TAG, "Credits poll: response CRC/parse error (n=%d)", (int)n);
+            sas_send_frame(lp_frame, cr_len);
+            n = sas_receive(resp_buf, sizeof(resp_buf), SAS_LONG_POLL_TIMEOUT);
+            SasCreditResponse cr = (n > 0) ? sas_parse_credits(resp_buf, n)
+                                            : SasCreditResponse{0, false};
+            if (cr.valid) {
+                s_retry_count = 0;
+                if (s_state == SLOT_STATE_OFFLINE || s_state == SLOT_STATE_INIT) {
+                    s_state = SLOT_STATE_IDLE;
+                    ESP_LOGI(TAG, "Machine online → IDLE");
+                }
+                if (cr.credits != last_credits) {
+                    int32_t delta = (int32_t)cr.credits - (int32_t)last_credits;
+                    ESP_LOGI(TAG, "Credits: %lu (%+ld)  $%.2f",
+                             (unsigned long)cr.credits, (long)delta,
+                             cr.credits / 100.0f);
+                    last_credits = cr.credits;
+                }
+            } else {
+                ESP_LOGW(TAG, "Credits poll: response CRC/parse error (n=%d)", (int)n);
+                s_retry_count++;
+                if (s_retry_count >= SAS_MAX_RETRIES && s_state != SLOT_STATE_OFFLINE) {
+                    ESP_LOGW(TAG, "Machine offline – Credits poll failing");
+                    s_state = SLOT_STATE_OFFLINE;
                 }
             }
         }
@@ -469,8 +548,8 @@ void sas_polling_task(void* pvParameters) {
             meters_tick = 0;
 
             size_t m_len = sas_build_lp_meters(lp_frame, g_machine_id);
-            sas_send_frame(lp_frame, m_len, false);
-            n = sas_receive(resp_buf, sizeof(resp_buf));
+            sas_send_frame(lp_frame, m_len);
+            n = sas_receive(resp_buf, sizeof(resp_buf), SAS_LONG_POLL_TIMEOUT);
             if (n > 0) {
                 SasMetersResponse mr = sas_parse_meters(resp_buf, n);
                 if (mr.valid) {

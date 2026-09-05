@@ -44,13 +44,35 @@
 #define SAS_POLL_INTERVAL_MS  40
 // Max retries before marking machine offline
 #define SAS_MAX_RETRIES        3
-// Timeout waiting for machine response (ms)
+// Timeout waiting for machine response (ms) -- used for General Poll and
+// other short/frequent exchanges (every SAS_POLL_INTERVAL_MS cycle).
 #define SAS_RESPONSE_TIMEOUT  20
+// Longer timeout for infrequent, larger responses (Credits, Meters, AFT,
+// Handpay) that need more bytes than a General Poll ack -- these only run
+// once every several cycles, so there's slack in the SAS_POLL_INTERVAL_MS
+// budget to wait longer without risking the 40ms hard requirement.
+// Worst case per SAS 6.02 timing rules: 20ms response window (time to
+// start responding) + up to 5ms per byte thereafter (max inter-byte gap).
+// Meters (LP 0xAF) is the longest response we parse at 16 bytes:
+// 20 + 15*5 = 95ms worst case -- 35ms was measured truncating every
+// single Credits/Meters response on real hardware (confirmed via
+// COM7 capture: 334/334 polls failed CRC, always cut off at n=3-4
+// bytes). 100ms gives headroom above the 95ms worst case.
+#define SAS_LONG_POLL_TIMEOUT  100
 
 // ──────────────────────────────────────────────────────────────
 // SAS Machine Address – derived at runtime from NVS machine_id.
 // g_machine_id (uint8_t) is set by machine_config_init().
 // ──────────────────────────────────────────────────────────────
+
+// Fixed "wakeup" poll address, sent as a preamble byte before the real
+// machine address on every SAS exchange. Confirmed against SASPyTourney
+// (github.com/jakeliedo/SASpyTourney, using the community `saspy`
+// library) as the real-hardware-verified value most EGMs expect --
+// 0x00-0x01 alone (what this firmware used to send) let real machines
+// echo/ignore the poll instead of reporting exceptions. Try 0x80 if
+// 0x82 doesn't work on a given machine.
+#define SAS_POLL_ADDRESS  0x82
 
 // ──────────────────────────────────────────────────────────────
 // Network / MQTT
