@@ -1,5 +1,7 @@
 @echo off
-REM Opens the serial monitor on COM7 (115200 baud). See build.bat for why
+REM Opens the serial monitor on the port set in platformio.ini's
+REM monitor_port (was COM7, changed to COM9 2026-09-05 -- see upload.bat).
+REM (115200 baud). See build.bat for why
 REM this must run via cmd.exe with MSYSTEM cleared.
 set MSYSTEM=
 set PLATFORMIO_CORE_DIR=X:\

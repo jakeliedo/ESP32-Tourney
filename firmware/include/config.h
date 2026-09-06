@@ -74,6 +74,17 @@
 // 0x82 doesn't work on a given machine.
 #define SAS_POLL_ADDRESS  0x82
 
+// AFT (LP 0x72) Asset Number -- a 4-byte value some machines validate
+// the transfer request against (SAS 6.02 status 0x93 "Asset number zero
+// or does not match" if it doesn't match the machine's configured asset
+// number). Confirmed 2026-09-05: 0 and the machine's tournament-tracking
+// ID (318) both got a real, correctly-parsed 0x93 rejection (the machine
+// echoes back whatever we send here rather than reporting what it
+// expects, so trial values can't be discovered from the response) --
+// the real value is this machine's own "SAS Asset Number" from its
+// operator/audit menu, distinct from any internal machine/tournament ID.
+#define SAS_AFT_ASSET_NUMBER  67UL
+
 // ──────────────────────────────────────────────────────────────
 // Network / MQTT
 // Per-machine values (IP, Client ID, topics) are derived at runtime

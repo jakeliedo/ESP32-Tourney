@@ -1,5 +1,9 @@
 @echo off
-REM Flashes the EVO firmware over COM7. See build.bat for why this must
+REM Flashes the EVO firmware over the port set in platformio.ini's
+REM upload_port (was COM7, changed to COM9 2026-09-05 after the FTDI
+REM adapter dropped out and Windows re-enumerated it under a new port --
+REM check Device Manager / list_ports if this ever needs updating again).
+REM See build.bat for why this must
 REM run via cmd.exe with MSYSTEM cleared and PLATFORMIO_CORE_DIR=X:\.
 REM
 REM BEFORE running this, put the board in boot/download mode manually

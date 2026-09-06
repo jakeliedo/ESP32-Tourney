@@ -339,6 +339,8 @@ VCC (5V)    ✗ KHÔNG NỐI — board tự có nguồn từ JW3510
 
 > **Nguồn khi flash:** JW3510 cấp điện qua cách ly galvanic có thể drop voltage lúc esptool write SPI flash (~400mA inrush). Nếu flash fail tại bước SFDP: cấp nguồn trực tiếp USB 1A+ vào ESP32-C3 VSYS (bypass JW3510), GND chung với FTDI.
 
+> **QUAN TRỌNG (phát hiện 2026-09-05) — jumper chọn mức điện áp logic trên FTDI phải để 3.3V, KHÔNG phải 5V.** Hầu hết adapter FTDI có jumper chuyển giữa 3.3V/5V cho mức tín hiệu TX/RX (không phải cấp nguồn VCC). ESP32-C3 là chip logic 3.3V — để jumper ở 5V khiến mức tín hiệu UART0 lệch chuẩn, gây **lỗi giao tiếp ngẫu nhiên, không cố định** khi flash (đúng loại triệu chứng đã gặp cả một phiên dài: `Serial data stream stopped`, `chip stopped responding`, `Invalid head of packet`, cổng COM tự rớt/đổi số... mỗi lần lỗi khác nhau, không lặp lại đúng 1 điểm). Chuyển jumper sang **3.3V** giải quyết dứt điểm — flash ổn định trở lại ngay cả khi vào boot mode bằng cách kéo tay GPIO9/EN xuống GND lần lượt (không cần quy trình power-cycle phức tạp). **Luôn kiểm tra jumper này ĐẦU TIÊN nếu flash báo lỗi ngẫu nhiên/không cố định** — trước khi nghi ngờ nguồn JW3510, cáp USB, hay upload_flags/baud rate.
+
 ---
 
 ### Nối dây V0259 (RS232 ↔ GPIO18/19)

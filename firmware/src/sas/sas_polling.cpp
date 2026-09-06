@@ -111,6 +111,24 @@ QueueHandle_t g_report_queue  = NULL;
 static volatile SlotState s_state = SLOT_STATE_INIT;
 static int     s_retry_count      = 0;
 
+// AFT registration state (LP 0x73) -- obtained once from the machine and
+// then reused on every LP 0x72 transfer. Added 2026-09-05: transfers kept
+// failing with AFT_STATUS_BAD_ASSET even with the machine's own confirmed
+// real asset number, because the Registration Key it expects back is
+// issued by the machine itself via LP 0x73, not something we can guess.
+static bool     s_aft_registered      = false;
+static uint32_t s_aft_asset_number    = 0;
+static uint8_t  s_aft_registration_key[20] = {0};
+
+// Physical machine identity (LP 0x54), queried once near boot -- see
+// query_machine_identity() and sas_polling.h for why this exists
+// separately from g_machine_id (which is just our own NVS-assigned
+// leaderboard/MQTT identity, not proof of which real cabinet is wired
+// to this board).
+static bool s_identity_known         = false;
+static char s_serial_number[41]      = {0};
+static char s_sas_version[4]         = {0};
+
 // ── Internal UART helpers ──────────────────────────────────────
 
 /**
@@ -155,10 +173,16 @@ static void sas_send_frame(const uint8_t* frame, size_t len) {
     uart_set_stop_bits(SAS_UART_NUM, UART_STOP_BITS_1);
     uart_flush(SAS_UART_NUM);
 #if SAS_LOG_RAW_FRAMES
-    uint8_t logged[34];
+    // 80 bytes covers the largest frame we build (AFT request, ~78 bytes
+    // incl. preamble). hex_dump() itself only prints the first 64 bytes
+    // of whatever it's given, so a full AFT dump still gets truncated in
+    // the log -- harmless, it's just for visibility; the real bytes sent
+    // come from frame[]/len below, not this copy.
+    uint8_t logged[80];
     logged[0] = SAS_POLL_ADDRESS;
-    memcpy(logged + 1, frame, len < 33 ? len : 33);
-    hex_dump("SAS TX", logged, len + 1);
+    size_t logged_len = len < 79 ? len : 79;
+    memcpy(logged + 1, frame, logged_len);
+    hex_dump("SAS TX", logged, logged_len + 1);
 #endif
     sas_send_byte(SAS_POLL_ADDRESS, true);
     sas_send_byte(frame[0], true);          // machine address – MARK
@@ -308,14 +332,70 @@ static bool execute_simple_command(uint8_t sas_cmd) {
     return acked;
 }
 
+// ── AFT registration (LP 0x73) ──────────────────────────────────
+
+/**
+ * Register this host for AFT transfers, per SAS 6.02. Must succeed
+ * before any LP 0x72 transfer will be accepted -- a transfer sent with
+ * a guessed asset number and an all-zero Registration Key gets rejected
+ * with AFT_STATUS_BAD_ASSET (0x93) regardless of whether the asset
+ * number itself is correct (confirmed on real hardware 2026-09-05).
+ * On success, stores the machine's authoritative asset number and the
+ * Registration Key it issued -- both required on every subsequent
+ * LP 0x72. Cached in s_aft_registered so this only runs once per boot.
+ */
+static bool perform_aft_registration() {
+    uint8_t frame[36];
+    uint8_t resp[40];
+    uint8_t zero_key[20] = {0};
+
+    size_t frame_len = sas_build_lp_aft_register(frame, g_machine_id, AFT_REG_CODE_REGISTER,
+                                                  SAS_AFT_ASSET_NUMBER, zero_key, 0);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+
+    if (n == 0) {
+        ESP_LOGW(TAG, "AFT registration: no response from machine");
+        return false;
+    }
+
+    SasAftRegisterResponse reg = sas_parse_aft_register(resp, n);
+    if (!reg.valid) {
+        ESP_LOGW(TAG, "AFT registration: response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+
+    if (reg.status_code == AFT_REG_STATUS_READY || reg.status_code == AFT_REG_STATUS_REGISTERED) {
+        s_aft_asset_number = reg.asset_number;
+        memcpy(s_aft_registration_key, reg.registration_key, 20);
+        s_aft_registered = true;
+        ESP_LOGI(TAG, "AFT registration OK: asset=%lu", (unsigned long)reg.asset_number);
+        return true;
+    }
+
+    ESP_LOGW(TAG, "AFT registration: machine returned status 0x%02X (not ready)", reg.status_code);
+    return false;
+}
+
 // ── AFT execution ──────────────────────────────────────────────
 
 static void execute_aft_command(const ServerCommand* cmd) {
-    uint8_t frame[32];
-    uint8_t resp[32];
+    // AFT (LP 0x72) request/response frames are much larger than other
+    // Long Polls -- full field layout (registration key, 3 amount fields,
+    // asset number, etc.) needs ~78 bytes request / up to ~90 bytes
+    // response (measured 67 bytes on real hardware with an empty txn_id;
+    // a full 20-char txn_id plus trailing meter fields can exceed that).
+    // The old 32-byte buffers silently truncated every real response.
+    uint8_t frame[96];
+    uint8_t resp[128];
 
     // Persist before sending (power-fail safety)
     nvs_save_pending_txn(cmd->txn_id, cmd->amount);
+
+    if (!s_aft_registered && !perform_aft_registration()) {
+        ESP_LOGW(TAG, "AFT: registration failed, aborting transfer  txn=%s", cmd->txn_id);
+        return;
+    }
 
     uint8_t transfer_code = (cmd->cmd_type == CMD_AFT_WITHDRAW)
                                 ? AFT_CODE_TRANSFER_PARTIAL
@@ -326,7 +406,8 @@ static void execute_aft_command(const ServerCommand* cmd) {
 
     size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
                                          transfer_code, transfer_type,
-                                         cmd->amount, cmd->txn_id);
+                                         cmd->amount, cmd->txn_id,
+                                         s_aft_asset_number, s_aft_registration_key);
     sas_send_frame(frame, frame_len);
     size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
 
@@ -352,6 +433,40 @@ static void execute_aft_command(const ServerCommand* cmd) {
     }
 }
 
+// ── Physical machine identity (LP 0x54) ─────────────────────────
+
+/**
+ * Query the real machine's SAS version + serial number once near boot.
+ * See sas_polling.h for why this exists (g_machine_id alone can't catch
+ * a board wired to the wrong physical cabinet). Safe to call repeatedly
+ * (e.g. retried by the caller) -- only updates state on a valid response.
+ */
+static bool query_machine_identity() {
+    uint8_t frame[4];
+    uint8_t resp[48];
+
+    size_t frame_len = sas_build_lp_version_serial(frame, g_machine_id);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+
+    if (n == 0) {
+        ESP_LOGW(TAG, "Machine identity: no response from machine");
+        return false;
+    }
+
+    SasVersionSerialResponse id = sas_parse_version_serial(resp, n);
+    if (!id.valid) {
+        ESP_LOGW(TAG, "Machine identity: response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+
+    strncpy(s_serial_number, id.serial_number, sizeof(s_serial_number) - 1);
+    strncpy(s_sas_version,   id.sas_version,   sizeof(s_sas_version) - 1);
+    s_identity_known = true;
+    ESP_LOGI(TAG, "Machine identity: SAS v%s, serial=\"%s\"", s_sas_version, s_serial_number);
+    return true;
+}
+
 // ── Recovery on boot: check if a pending AFT exists in NVS ────
 
 static void recover_pending_aft() {
@@ -369,11 +484,18 @@ static void recover_pending_aft() {
     ESP_LOGW(TAG, "Recovering pending AFT txn=%s amount=%lu", txn_id,
              (unsigned long)amount);
 
+    if (!s_aft_registered && !perform_aft_registration()) {
+        ESP_LOGW(TAG, "AFT recovery: registration failed, will retry on next AFT command");
+        return;
+    }
+
     // Interrogate the machine to see if it already received the funds
-    uint8_t frame[32], resp[32];
+    // (see execute_aft_command() for why these are 96/128, not 32)
+    uint8_t frame[96], resp[128];
     size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
                                          AFT_CODE_INTERROGATE, AFT_TYPE_CASHABLE,
-                                         0, txn_id);
+                                         0, txn_id,
+                                         s_aft_asset_number, s_aft_registration_key);
     sas_send_frame(frame, frame_len);
     size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
     if (n > 0) {
@@ -403,8 +525,17 @@ void sas_polling_task(void* pvParameters) {
     uint32_t last_coin_in  = 0;
     uint32_t last_coin_out = 0;
 
-    // Check for pending transaction from previous power cycle
+    // Query the real machine's identity once, before anything else --
+    // see query_machine_identity() for why. A few retries here since
+    // this only needs to succeed once ever (not every boot matters as
+    // much as getting it eventually), and the link may still be settling
+    // right after power-up.
     vTaskDelay(pdMS_TO_TICKS(500));
+    for (int attempt = 0; attempt < 3 && !s_identity_known; attempt++) {
+        query_machine_identity();
+    }
+
+    // Check for pending transaction from previous power cycle
     recover_pending_aft();
 
     TickType_t last_wake = xTaskGetTickCount();
@@ -591,4 +722,16 @@ void sas_polling_task_start() {
 
 SlotState sas_get_state() {
     return s_state;
+}
+
+bool sas_identity_known() {
+    return s_identity_known;
+}
+
+const char* sas_get_serial_number() {
+    return s_serial_number;
+}
+
+const char* sas_get_sas_version() {
+    return s_sas_version;
 }

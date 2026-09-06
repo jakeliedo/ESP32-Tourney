@@ -21,6 +21,7 @@ char      g_topic_telemetry[44] = {};
 char      g_topic_events[44]    = {};
 char      g_topic_commands[44]  = {};
 char      g_topic_status[44]    = {};
+char      g_topic_identity[44]  = {};
 
 // Derive all runtime config from a confirmed machine_id.
 static void derive_config(uint8_t id) {
@@ -32,6 +33,7 @@ static void derive_config(uint8_t id) {
     snprintf(g_topic_events,     sizeof(g_topic_events),     "casino/machine/%02d/events",    id);
     snprintf(g_topic_commands,   sizeof(g_topic_commands),   "casino/machine/%02d/commands",  id);
     snprintf(g_topic_status,     sizeof(g_topic_status),     "casino/machine/%02d/status",    id);
+    snprintf(g_topic_identity,   sizeof(g_topic_identity),   "casino/machine/%02d/identity",  id);
 }
 
 // Block on Serial waiting for "SET_ID <1-99>".

@@ -29,6 +29,10 @@ static const char* TAG = "MQTT";
 static WiFiClient   s_net_client;
 static PubSubClient s_mqtt(s_net_client);
 
+// Set false on every (re)connect; publish_identity_if_known() flips it
+// true once it has actually published (see below).
+static bool s_identity_published = false;
+
 // ── MQTT incoming message callback ────────────────────────────
 
 static void on_message(char* topic, uint8_t* payload, unsigned int length) {
@@ -84,6 +88,7 @@ static void mqtt_reconnect() {
             ESP_LOGI(TAG, "MQTT connected");
             s_mqtt.subscribe(g_topic_commands);
             s_mqtt.publish(g_topic_status, "online", true);
+            s_identity_published = false;  // re-publish identity on every (re)connect
         } else {
             ESP_LOGW(TAG, "MQTT connect failed rc=%d, retry in %lums",
                      s_mqtt.state(), (unsigned long)delay_ms);
@@ -91,6 +96,30 @@ static void mqtt_reconnect() {
             if (delay_ms < 30000) delay_ms *= 2;
         }
     }
+}
+
+// ── Physical machine identity (LP 0x54, published once) ───────
+//
+// Retained so the backend sees it immediately on subscribe, even if it
+// connects after this board already published. Re-published on every
+// reconnect (cheap, and covers a broker restart losing retained state).
+// See sas_polling.h for why this is a separate identity from
+// g_machine_id: it's the only thing that lets the backend confirm a
+// board is actually wired to the physical machine it's supposed to be,
+// right after connecting a whole bank of machines to the switch.
+
+static void publish_identity_if_known() {
+    if (s_identity_published || !sas_identity_known()) return;
+
+    StaticJsonDocument<128> doc;
+    doc["machine_id"]  = g_mqtt_client_id;
+    doc["sas_version"] = sas_get_sas_version();
+    doc["serial"]       = sas_get_serial_number();
+
+    char buf[128];
+    serializeJson(doc, buf, sizeof(buf));
+    s_mqtt.publish(g_topic_identity, buf, true);  // retained
+    s_identity_published = true;
 }
 
 // ── Report_Queue → JSON serialiser ────────────────────────────
@@ -123,6 +152,12 @@ void mqtt_network_task(void* pvParameters) {
             mqtt_reconnect();
         }
         s_mqtt.loop();  // Process keep-alive and incoming messages
+
+        // SAS identity (LP 0x54) may still be querying when MQTT first
+        // connects (up to ~1.8s after boot) -- keep checking each loop
+        // tick until it's known and published; a no-op cheap check once
+        // s_identity_published latches true.
+        publish_identity_if_known();
 
         // Drain Report_Queue – process up to 10 events per iteration
         MachineEvent ev;

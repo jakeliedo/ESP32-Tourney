@@ -64,3 +64,17 @@ void sas_polling_task(void* pvParameters);
  * Get current slot machine state (thread-safe read).
  */
 SlotState sas_get_state();
+
+/**
+ * Physical machine identity (SAS version + real serial number), queried
+ * once via LP 0x54 near boot -- see sas_polling.cpp's query_machine_identity().
+ * Added 2026-09-05 so the backend can verify a board is wired to the
+ * physical machine it's supposed to be (this project's own machine_id is
+ * just an NVS-assigned leaderboard/MQTT identity, not a real machine ID --
+ * it can't catch a board plugged into the wrong cabinet by itself).
+ * sas_identity_known() returns false until the query has succeeded once;
+ * the getters return empty strings until then.
+ */
+bool        sas_identity_known();
+const char* sas_get_serial_number();
+const char* sas_get_sas_version();
