@@ -3,9 +3,10 @@ import { io, Socket } from 'socket.io-client';
 import api, {
   getMachines, sendMachineCommand, aftInAll, aftOutAll,
   createTournament, startTournament, endTournament, cancelTournament,
-  setVirtualJackpotConfig, getVirtualJackpotVideoUrl, uploadJackpotVideo, clearJackpotVideo,
+  setVirtualJackpotConfig, setRealJackpotConfig, setJackpotMode, getJackpotMode,
+  getVirtualJackpotVideoUrl, uploadJackpotVideo, clearJackpotVideo,
   getJackpotHits,
-  Machine, Player, SessionDto, JackpotHit,
+  Machine, Player, SessionDto, JackpotHit, JackpotMode,
   getHistory, getPlayers, upsertPlayer, deletePlayer,
 } from './services/api';
 
@@ -56,10 +57,12 @@ export default function App() {
   const [newMembership, setNewMembership]    = useState('');
   const [newPlayerName, setNewPlayerName]    = useState('');
   const [sessionName, setSessionName]        = useState('');
-  const [vjpEnabled, setVjpEnabled]          = useState(false);
-  const [vjpFloor,   setVjpFloor]            = useState('100');
-  const [vjpCeiling, setVjpCeiling]          = useState('300');
-  const [vjpRate,    setVjpRate]             = useState('1');
+  // Jackpot mode + config
+  const [jpMode,    setJpMode]    = useState<JackpotMode>('virtual');
+  const [jpFloor,   setJpFloor]   = useState('100');    // $ display value
+  const [jpCeiling, setJpCeiling] = useState('300');    // $ display value
+  const [jpRate,    setJpRate]    = useState('0.5');    // % (real JP only)
+  const [vjpTick,   setVjpTick]   = useState('5');      // credits/tick (virtual JP only)
   const [vjpVideoName, setVjpVideoName]      = useState<string | null>(null);
   const [vjpVideoUploading, setVjpVideoUploading] = useState(false);
   const [jackpotHits, setJackpotHits]        = useState<JackpotHit[]>([]);
@@ -243,13 +246,28 @@ export default function App() {
   };
 
   const handleStart = async () => {
-    // Push virtual jackpot config to backend before starting
-    setVirtualJackpotConfig({
-      floor:   Math.round((parseFloat(vjpFloor)   || 100) * 100),
-      ceiling: Math.round((parseFloat(vjpCeiling) || 300) * 100),
-      rate:    parseFloat(vjpRate) || 1,
-      enabled: vjpEnabled,
-    }).catch(() => {});
+    // Push jackpot config + mode before starting
+    const floorCents   = Math.round((parseFloat(jpFloor)   || 100) * 100);
+    const ceilingCents = Math.round((parseFloat(jpCeiling) || 300) * 100);
+    setJackpotMode(jpMode).catch(() => {});
+    if (jpMode === 'virtual') {
+      setVirtualJackpotConfig({
+        floor: floorCents, ceiling: ceilingCents,
+        tickIncrement: parseInt(vjpTick) || 5,
+        enabled: true,
+      }).catch(() => {});
+    } else {
+      setRealJackpotConfig({
+        floor: floorCents, ceiling: ceilingCents,
+        rate: parseFloat(jpRate) || 0.5,
+      }).catch(() => {});
+      // Disable virtual JP when mode is real
+      setVirtualJackpotConfig({
+        floor: floorCents, ceiling: ceilingCents,
+        tickIncrement: parseInt(vjpTick) || 5,
+        enabled: false,
+      }).catch(() => {});
+    }
 
     // Auto-select all connected (non-offline) machines — no manual "Enable All" required
     const enabled = machines.filter(m => m.status.toLowerCase() !== 'offline');
@@ -329,8 +347,9 @@ export default function App() {
     setSessionName('');
   };
 
-  // ── VJP video — load current filename on mount ────────────
+  // ── Jackpot — load mode + video filename on mount ────────
   useEffect(() => {
+    getJackpotMode().then(r => setJpMode(r.mode)).catch(() => {});
     getVirtualJackpotVideoUrl().then(r => { if (r.name) setVjpVideoName(r.name); }).catch(() => {});
   }, []);
 
@@ -466,46 +485,77 @@ export default function App() {
           />
         </div>
 
-        {/* Virtual Jackpot Engine */}
-        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <label style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            fontSize: 11, color: vjpEnabled ? '#5bb8ff' : 'var(--text-2)',
-            cursor: 'pointer', flexShrink: 0, fontWeight: vjpEnabled ? 600 : 400,
-            transition: 'color .2s',
-          }}>
-            <input
-              type="checkbox"
-              checked={vjpEnabled}
-              onChange={e => setVjpEnabled(e.target.checked)}
-              disabled={tournamentActive}
-              style={{ cursor: 'pointer', accentColor: '#5bb8ff' }}
-            />
-            Virtual Jackpot
-          </label>
-          {vjpEnabled && <>
+        {/* Jackpot Engine */}
+        <div style={{ marginTop: 8 }}>
+          {/* Mode toggle */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ ...s.fieldLabel, flexShrink: 0 }}>Jackpot</span>
+            <div style={{
+              display: 'flex', border: '1px solid var(--border)',
+              borderRadius: 4, overflow: 'hidden', flexShrink: 0,
+              opacity: tournamentActive ? 0.4 : 1,
+            }}>
+              {(['real', 'virtual'] as JackpotMode[]).map(m => (
+                <button
+                  key={m}
+                  disabled={tournamentActive}
+                  onClick={() => setJpMode(m)}
+                  style={{
+                    padding: '3px 12px', fontSize: 11, fontWeight: 700,
+                    letterSpacing: '.06em', textTransform: 'uppercase',
+                    border: 'none', cursor: tournamentActive ? 'default' : 'pointer',
+                    background: jpMode === m
+                      ? (m === 'real' ? '#e8b84b' : '#5bb8ff')
+                      : 'var(--bg-2)',
+                    color: jpMode === m ? '#111' : 'var(--text-2)',
+                    transition: 'background .15s, color .15s',
+                  }}
+                >{m}</button>
+              ))}
+            </div>
+
+            {/* Floor / Ceiling — shared for both modes */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
               <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Floor $</span>
-              <input type="number" value={vjpFloor}
-                onChange={e => setVjpFloor(e.target.value)}
+              <input type="number" value={jpFloor}
+                onChange={e => setJpFloor(e.target.value)}
                 min="1" disabled={tournamentActive}
                 style={{ width: 60, opacity: tournamentActive ? 0.4 : 1 }} />
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
               <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Ceiling $</span>
-              <input type="number" value={vjpCeiling}
-                onChange={e => setVjpCeiling(e.target.value)}
+              <input type="number" value={jpCeiling}
+                onChange={e => setJpCeiling(e.target.value)}
                 min="1" disabled={tournamentActive}
                 style={{ width: 60, opacity: tournamentActive ? 0.4 : 1 }} />
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Rate %</span>
-              <input type="number" value={vjpRate}
-                onChange={e => setVjpRate(e.target.value)}
-                min="0.1" max="100" step="0.1" disabled={tournamentActive}
-                style={{ width: 52, opacity: tournamentActive ? 0.4 : 1 }} />
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+
+            {/* Real JP: contribution rate */}
+            {jpMode === 'real' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Rate %</span>
+                <input type="number" value={jpRate}
+                  onChange={e => setJpRate(e.target.value)}
+                  min="0.01" max="100" step="0.01" disabled={tournamentActive}
+                  style={{ width: 52, opacity: tournamentActive ? 0.4 : 1 }} />
+              </div>
+            )}
+
+            {/* Virtual JP: tick increment */}
+            {jpMode === 'virtual' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Credits/tick</span>
+                <input type="number" value={vjpTick}
+                  onChange={e => setVjpTick(e.target.value)}
+                  min="0" step="1" disabled={tournamentActive}
+                  style={{ width: 52, opacity: tournamentActive ? 0.4 : 1 }} />
+              </div>
+            )}
+          </div>
+
+          {/* Virtual JP: hit video (shown below when virtual selected) */}
+          {jpMode === 'virtual' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
               <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Hit Video</span>
               <input
                 ref={vjpVideoRef}
@@ -519,13 +569,13 @@ export default function App() {
                 style={{
                   fontSize: 10, padding: '2px 8px',
                   color: vjpVideoName ? '#5bb8ff' : 'var(--text-2)',
-                  maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 }}
                 title={vjpVideoName ?? 'No video selected'}
                 onClick={() => vjpVideoRef.current?.click()}
                 disabled={vjpVideoUploading}
               >
-                {vjpVideoUploading ? '…' : vjpVideoName ? vjpVideoName : 'Browse…'}
+                {vjpVideoUploading ? '…' : vjpVideoName ?? 'Browse…'}
               </button>
               {vjpVideoName && (
                 <button
@@ -535,7 +585,7 @@ export default function App() {
                 >✕</button>
               )}
             </div>
-          </>}
+          )}
         </div>
       </div>
 

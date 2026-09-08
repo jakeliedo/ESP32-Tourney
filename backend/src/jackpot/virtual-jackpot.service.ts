@@ -1,13 +1,15 @@
 // =============================================================
 // virtual-jackpot.service.ts – Virtual Progressive Jackpot Engine
 //
-// Algorithm (mirrors real casino progressive jackpots):
-//  1. Pool starts at `floor` when a tournament round begins
-//  2. Each 2-second tick: compute coin_in delta across all machines
-//  3. contribution = Σ(coin_in_delta) × rate  (e.g. 1% of coins wagered)
-//  4. Pool grows by contribution each tick
-//  5. A secret hit_value is drawn at random from [floor, ceiling) at reset
-//  6. When pool ≥ hit_value → jackpot fires → pool resets to floor
+// Algorithm:
+//  1. Pool starts at floor when configured/reset
+//  2. Each 2-second tick (while tournament ACTIVE): pool += tickIncrement
+//     — constant, fixed credits per tick, independent of coin-in activity
+//  3. A secret hit_value is drawn at random from [ceiling×0.8, ceiling)
+//     at reset, so jackpot fires in the top 20% window near ceiling
+//  4. When pool >= hit_value → jackpot fires → pool resets to floor
+//
+// Mode: only ticks when jackpot:mode = 'virtual' (Redis).
 // =============================================================
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -21,13 +23,11 @@ import { JackpotHitEntity } from '../database/entities/jackpot_hit.entity';
 @Injectable()
 export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
   private ticker: ReturnType<typeof setInterval> | null = null;
-  private lastCoinIn = new Map<string, number>();
 
-  // In-memory mirror of Redis config (loaded on init, updated by configure())
-  private enabled = false;
-  private floor   = 10000;   // credits = $100.00
-  private ceiling = 30000;   // credits = $300.00
-  private rate    = 0.01;    // 1% — decimal form of the UI percentage
+  private enabled       = false;
+  private floor         = 10000;   // credits = $100.00
+  private ceiling       = 30000;   // credits = $300.00
+  private tickIncrement = 5;       // credits added per 2s tick (constant, no coin-in dependency)
 
   constructor(
     private redis: RedisService,
@@ -40,7 +40,6 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit(): Promise<void> {
     await this.loadConfig();
-    // Poll every 2 s — reads machine coin_in from Redis digital twin
     this.ticker = setInterval(() => this.tick().catch(() => {}), 2000);
   }
 
@@ -53,36 +52,31 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
   async configure(
     floor: number,
     ceiling: number,
-    rate: number,     // UI sends percentage (e.g. 1.0); stored as decimal
+    tickIncrement: number,  // credits added per 2s tick
     enabled: boolean,
   ): Promise<void> {
-    this.floor   = Math.max(1, Math.floor(floor));
-    this.ceiling = Math.max(this.floor + 1, Math.floor(ceiling));
-    this.rate    = Math.max(0, rate) / 100;
-    this.enabled = enabled;
-    this.lastCoinIn.clear(); // reset delta tracking for new round
+    this.floor         = Math.max(1, Math.floor(floor));
+    this.ceiling       = Math.max(this.floor + 1, Math.floor(ceiling));
+    this.tickIncrement = Math.max(0, Math.round(tickIncrement));
+    this.enabled       = enabled;
 
-    await this.redis.set('vjp:floor',   String(this.floor));
-    await this.redis.set('vjp:ceiling', String(this.ceiling));
-    await this.redis.set('vjp:rate',    String(this.rate));
-    await this.redis.set('vjp:enabled', enabled ? 'true' : 'false');
+    await this.redis.set('vjp:floor',          String(this.floor));
+    await this.redis.set('vjp:ceiling',        String(this.ceiling));
+    await this.redis.set('vjp:tick_increment', String(this.tickIncrement));
+    await this.redis.set('vjp:enabled',        enabled ? 'true' : 'false');
 
     if (enabled) {
-      // Reset pool to floor and generate a new secret hit value
       await this.redis.set('vjp:pool', String(this.floor));
       await this.redis.set('vjp:hit',  String(this.newHitValue()));
-      // Immediately broadcast so leaderboard shows starting value
       this.leaderboard.broadcastJackpotPool(this.floor);
     }
   }
 
+  getConfig(): { floor: number; ceiling: number; tickIncrement: number; enabled: boolean } {
+    return { floor: this.floor, ceiling: this.ceiling, tickIncrement: this.tickIncrement, enabled: this.enabled };
+  }
+
   async getPool(): Promise<number> {
-    // Math.round, not Math.floor: the pool accrues fractional cents every
-    // tick (totalDelta * rate, e.g. 1% of coin-in), so it's virtually
-    // never a whole number internally. Flooring it for display/payout
-    // always throws away that fractional remainder in the same direction
-    // (down), which is a real, systematic underpayment over a tournament's
-    // lifetime, not just display noise -- round to the nearest cent instead.
     const v = await this.redis.get('vjp:pool');
     return v ? Math.round(parseFloat(v)) : this.floor;
   }
@@ -93,14 +87,18 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
     const en = await this.redis.get('vjp:enabled');
     const f  = await this.redis.get('vjp:floor');
     const c  = await this.redis.get('vjp:ceiling');
-    const r  = await this.redis.get('vjp:rate');
-    this.enabled = en === 'true';
-    if (f) this.floor   = parseInt(f);
-    if (c) this.ceiling = parseInt(c);
-    if (r) this.rate    = parseFloat(r);
+    const ti = await this.redis.get('vjp:tick_increment');
+    this.enabled       = en === 'true';
+    if (f)  this.floor         = parseInt(f);
+    if (c)  this.ceiling       = parseInt(c);
+    if (ti) this.tickIncrement = parseInt(ti);
   }
 
   private async tick(): Promise<void> {
+    // Only run when mode = 'virtual'
+    const mode = await this.redis.get('jackpot:mode');
+    if (mode === 'real') return;
+
     if (!this.enabled) return;
 
     const active = await this.tournaments.findOne({
@@ -109,62 +107,39 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
     });
     if (!active) return;
 
-    // Sum coin_in deltas across all machines in the tournament
-    let totalDelta = 0;
-    for (const machineId of active.machine_ids) {
-      const state = await this.redis.getMachineState(machineId);
-      if (!state?.coin_in) continue;
-      const current = parseInt(state.coin_in);
-      const last    = this.lastCoinIn.get(machineId) ?? current;
-      const delta   = current - last;
-      if (delta > 0) totalDelta += delta;
-      this.lastCoinIn.set(machineId, current);
-    }
-
-    // Load current pool
+    // Constant increment — no coin-in dependency
     const poolStr = await this.redis.get('vjp:pool');
     let pool = poolStr ? parseFloat(poolStr) : this.floor;
+    pool += this.tickIncrement;
 
-    if (totalDelta > 0) {
-      pool += totalDelta * this.rate;
+    const hitStr = await this.redis.get('vjp:hit');
+    const hit    = hitStr ? parseInt(hitStr) : this.ceiling;
 
-      const hitStr = await this.redis.get('vjp:hit');
-      const hit    = hitStr ? parseInt(hitStr) : this.ceiling;
-
-      if (pool >= hit) {
-        // Jackpot fires — award to the current tournament leader
-        const rankings = await this.redis.getLeaderboard(active.id);
-        const winner   = rankings[0]?.machineId ?? 'VIRTUAL';
-        // Round, not floor -- see getPool() above. The actual payout sent
-        // to the machine must be a whole number of cents (AFT can't carry
-        // sub-cent amounts), but rounding to the nearest cent instead of
-        // always truncating down keeps the payout honest to the real
-        // accrued pool value instead of systematically shorting it.
-        const amount   = Math.round(pool);
-        console.log(`🎰 Virtual Jackpot HIT — ${winner}: $${(amount / 100).toFixed(2)}`);
-        // Persist hit record
-        await this.jackpotHits.save({
-          machine_id:    winner,
-          amount,
-          tournament_id: active.id,
-          session_id:    active.session_id ?? null,
-        });
-        // Broadcast with optional video URL
-        const videoUrl = await this.redis.get('vjp:video_url');
-        this.leaderboard.broadcastJackpotHit(winner, amount, videoUrl || null);
-        // Reset pool and re-arm
-        pool = this.floor;
-        await this.redis.set('vjp:hit', String(this.newHitValue()));
-      }
-
-      await this.redis.set('vjp:pool', String(pool));
+    if (pool >= hit) {
+      const rankings = await this.redis.getLeaderboard(active.id);
+      const winner   = rankings[0]?.machineId ?? 'VIRTUAL';
+      const amount   = Math.round(pool);
+      console.log(`🎰 Virtual Jackpot HIT — ${winner}: $${(amount / 100).toFixed(2)}`);
+      await this.jackpotHits.save({
+        machine_id:    winner,
+        amount,
+        tournament_id: active.id,
+        session_id:    active.session_id ?? null,
+      });
+      const videoUrl = await this.redis.get('vjp:video_url');
+      this.leaderboard.broadcastJackpotHit(winner, amount, videoUrl || null);
+      pool = this.floor;
+      await this.redis.set('vjp:hit', String(this.newHitValue()));
     }
 
-    // Always broadcast current pool while tournament is running
+    await this.redis.set('vjp:pool', String(pool));
     this.leaderboard.broadcastJackpotPool(Math.round(pool));
   }
 
+  // Hit value drawn from top 20% of [floor, ceiling) — fires near ceiling
   private newHitValue(): number {
-    return Math.floor(this.floor + Math.random() * (this.ceiling - this.floor));
+    const low = Math.floor(this.ceiling * 0.8);
+    const high = this.ceiling;
+    return Math.floor(low + Math.random() * (high - low));
   }
 }

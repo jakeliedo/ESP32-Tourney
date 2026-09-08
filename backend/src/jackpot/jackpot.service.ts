@@ -1,11 +1,14 @@
 // =============================================================
-// jackpot.service.ts – Mystery Jackpot Engine
+// jackpot.service.ts – Mystery Jackpot Engine (Real JP)
 //
 // Algorithm:
-//  1. Each coin-in event contributes JACKPOT_CONTRIBUTION_RATE% to pool
+//  1. Each coin-in event contributes contributionRate% to pool
 //  2. When pool crosses a secret PRNG hit_value, jackpot fires
 //  3. AFT Cashable transfer sent directly to the triggering machine
-//  4. Pool resets to JACKPOT_BASE_AMOUNT; new hit_value generated
+//  4. Pool resets to floor; new hit_value generated in [floor, ceiling)
+//
+// Mode: only active when jackpot:mode = 'real' (Redis).
+// configure() is called by the controller when operator updates settings.
 // =============================================================
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -21,8 +24,8 @@ import { TransactionEntity, TransactionType, TransactionStatus } from '../databa
 @Injectable()
 export class JackpotService implements OnModuleInit {
   private contributionRate: number;
-  private baseAmount: number;
-  private maxAmount: number;
+  private floor: number;
+  private ceiling: number;
 
   constructor(
     private cfg: ConfigService,
@@ -34,41 +37,73 @@ export class JackpotService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
+    // Load defaults from .env
     this.contributionRate = +this.cfg.get('JACKPOT_CONTRIBUTION_RATE', 0.5) / 100;
-    this.baseAmount = +this.cfg.get('JACKPOT_BASE_AMOUNT', 10000);
-    this.maxAmount  = +this.cfg.get('JACKPOT_MAX_AMOUNT', 1000000);
+    this.floor   = +this.cfg.get('JACKPOT_BASE_AMOUNT', 10000);
+    this.ceiling = +this.cfg.get('JACKPOT_MAX_AMOUNT', 1000000);
 
-    // Ensure jackpot pool and hit_value are initialised
+    // Override with saved config from Redis (persists across restarts)
+    const f = await this.redis.get('jackpot:floor');
+    const c = await this.redis.get('jackpot:ceiling');
+    const r = await this.redis.get('jackpot:contrib_rate');
+    if (f) this.floor   = parseInt(f);
+    if (c) this.ceiling = parseInt(c);
+    if (r) this.contributionRate = parseFloat(r);
+
+    // Ensure pool and hit_value are initialised
     const pool = await this.redis.getJackpotPool();
-    if (pool === 0) {
-      await this.redis.resetJackpotPool(this.baseAmount);
-    }
+    if (pool === 0) await this.redis.resetJackpotPool(this.floor);
     const hitValue = await this.redis.getJackpotHitValue();
-    if (hitValue === 0) {
-      await this.generateNewHitValue();
-    }
+    if (hitValue === 0) await this.generateNewHitValue();
+  }
+
+  // ── Called by controller when operator updates settings ───
+
+  async configure(floor: number, ceiling: number, rate: number): Promise<void> {
+    this.floor   = Math.max(1, Math.floor(floor));
+    this.ceiling = Math.max(this.floor + 1, Math.floor(ceiling));
+    this.contributionRate = Math.max(0, rate) / 100;
+
+    await this.redis.set('jackpot:floor',        String(this.floor));
+    await this.redis.set('jackpot:ceiling',      String(this.ceiling));
+    await this.redis.set('jackpot:contrib_rate', String(this.contributionRate));
+
+    // Reset pool and arm a new hit value
+    await this.redis.resetJackpotPool(this.floor);
+    await this.generateNewHitValue();
+  }
+
+  getConfig(): { floor: number; ceiling: number; rate: number } {
+    return {
+      floor:   this.floor,
+      ceiling: this.ceiling,
+      rate:    this.contributionRate * 100,
+    };
   }
 
   // ── Called by Device Gateway for every coin-in event ─────
 
   async processCoinIn(machineId: string, coinInAmount: number): Promise<void> {
+    // Only contribute when mode is 'real'
+    const mode = await this.redis.get('jackpot:mode');
+    if (mode === 'virtual') return;
+
     const contribution = coinInAmount * this.contributionRate;
     const newPool = await this.redis.incrementJackpotPool(contribution);
     const hitValue = await this.redis.getJackpotHitValue();
 
     if (newPool >= hitValue) {
-      await this.triggerJackpot(machineId, Math.floor(newPool));
+      await this.triggerJackpot(machineId, Math.round(newPool));
     }
   }
 
   // ── Jackpot trigger ───────────────────────────────────────
 
   private async triggerJackpot(machineId: string, amount: number): Promise<void> {
-    console.log(`🎰 JACKPOT HIT on ${machineId}: ${amount} credits`);
+    console.log(`🎰 JACKPOT HIT on ${machineId}: ${amount} credits ($${(amount / 100).toFixed(2)})`);
 
     const txn_id = uuidv4();
 
-    // Log transaction first (immutable record)
     await this.transactions.save({
       txn_id,
       machine_id: machineId,
@@ -77,29 +112,20 @@ export class JackpotService implements OnModuleInit {
       amount,
     });
 
-    // Send AFT Cashable to the winning machine
-    this.mqtt.sendCommand(machineId, {
-      type: 'AFT_PUMP',
-      amount,
-      txn_id,
-    });
-
-    // Notify all Leaderboard screens
+    this.mqtt.sendCommand(machineId, { type: 'AFT_PUMP', amount, txn_id });
     this.leaderboard.broadcastJackpotHit(machineId, amount);
 
-    // Reset pool and generate new secret hit value
-    await this.redis.resetJackpotPool(this.baseAmount);
+    await this.redis.resetJackpotPool(this.floor);
     await this.generateNewHitValue();
   }
 
-  // ── PRNG: generate new secret hit value ──────────────────
+  // ── PRNG: hit value in [floor, ceiling) ──────────────────
 
   private async generateNewHitValue(): Promise<void> {
-    const range = this.maxAmount - this.baseAmount;
-    // Cryptographically sufficient for gaming: uniform distribution
-    const hitValue = this.baseAmount + Math.floor(Math.random() * range);
+    const range    = this.ceiling - this.floor;
+    const hitValue = this.floor + Math.floor(Math.random() * range);
     await this.redis.setJackpotHitValue(hitValue);
-    console.log(`New jackpot hit value set (internal)`);
+    console.log('New real jackpot hit value set (internal)');
   }
 
   async getPoolAmount(): Promise<number> {

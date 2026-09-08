@@ -105,13 +105,41 @@ export const upsertPlayer = (data: Player): Promise<Player> =>
 export const deletePlayer = (membershipNumber: string): Promise<void> =>
   api.delete(`/players/${encodeURIComponent(membershipNumber)}`).then(() => undefined);
 
-// Virtual Jackpot
-export interface VirtualJackpotConfig {
+// Jackpot mode
+export type JackpotMode = 'real' | 'virtual';
+
+export const getJackpotMode = (): Promise<{ mode: JackpotMode }> =>
+  api.get<{ mode: JackpotMode }>('/jackpot/mode').then(r => r.data);
+
+export const setJackpotMode = (mode: JackpotMode): Promise<void> =>
+  api.post('/jackpot/mode', { mode }).then(() => undefined);
+
+// Real Jackpot config
+export interface RealJackpotConfig {
   floor: number;    // credits (e.g. 10000 = $100.00)
-  ceiling: number;  // credits (e.g. 30000 = $300.00)
-  rate: number;     // percentage (e.g. 1.0 = 1%)
+  ceiling: number;  // credits (e.g. 1000000 = $10000.00)
+  rate: number;     // percentage (e.g. 0.5 = 0.5%)
+}
+
+export const getRealJackpotConfig = (): Promise<RealJackpotConfig> =>
+  api.get<RealJackpotConfig>('/jackpot/config').then(r => r.data);
+
+export const setRealJackpotConfig = (config: RealJackpotConfig): Promise<void> =>
+  api.post('/jackpot/config', config).then(() => undefined);
+
+// Virtual Jackpot config
+export interface VirtualJackpotConfig {
+  floor: number;          // credits (e.g. 10000 = $100.00)
+  ceiling: number;        // credits (e.g. 30000 = $300.00)
+  tickIncrement: number;  // credits added per 2s tick (constant, no coin-in dependency)
   enabled: boolean;
 }
+
+export const getVirtualJackpotConfig = (): Promise<VirtualJackpotConfig> =>
+  api.get<VirtualJackpotConfig>('/jackpot/virtual/config').then(r => r.data);
+
+export const setVirtualJackpotConfig = (config: VirtualJackpotConfig): Promise<void> =>
+  api.post('/jackpot/virtual/config', config).then(() => undefined);
 
 export interface JackpotHit {
   id: number;
@@ -121,9 +149,6 @@ export interface JackpotHit {
   session_id: string | null;
   hit_at: string;
 }
-
-export const setVirtualJackpotConfig = (config: VirtualJackpotConfig): Promise<void> =>
-  api.post('/jackpot/virtual/config', config).then(() => undefined);
 
 export const getVirtualJackpotPool = (): Promise<{ pool: number }> =>
   api.get<{ pool: number }>('/jackpot/virtual/pool').then(r => r.data);
