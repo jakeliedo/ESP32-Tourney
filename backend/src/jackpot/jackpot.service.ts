@@ -20,6 +20,7 @@ import { RedisService } from '../redis/redis.module';
 import { MqttGatewayService } from '../device-gateway/mqtt-gateway.service';
 import { LeaderboardGateway } from '../device-gateway/leaderboard.gateway';
 import { TransactionEntity, TransactionType, TransactionStatus } from '../database/entities/transaction.entity';
+import { TournamentEntity, TournamentStatus } from '../database/entities/tournament.entity';
 
 @Injectable()
 export class JackpotService implements OnModuleInit {
@@ -34,6 +35,8 @@ export class JackpotService implements OnModuleInit {
     private leaderboard: LeaderboardGateway,
     @InjectRepository(TransactionEntity)
     private transactions: Repository<TransactionEntity>,
+    @InjectRepository(TournamentEntity)
+    private tournaments: Repository<TournamentEntity>,
   ) {}
 
   async onModuleInit() {
@@ -84,9 +87,15 @@ export class JackpotService implements OnModuleInit {
   // ── Called by Device Gateway for every coin-in event ─────
 
   async processCoinIn(machineId: string, coinInAmount: number): Promise<void> {
-    // Only contribute when mode is 'real'
+    // Only contribute when mode is 'real' AND a tournament is currently running
     const mode = await this.redis.get('jackpot:mode');
     if (mode === 'virtual') return;
+
+    const active = await this.tournaments.findOne({
+      where: { status: TournamentStatus.ACTIVE },
+      order: { id: 'DESC' },
+    });
+    if (!active) return;
 
     const contribution = coinInAmount * this.contributionRate;
     const newPool = await this.redis.incrementJackpotPool(contribution);
@@ -113,7 +122,8 @@ export class JackpotService implements OnModuleInit {
     });
 
     this.mqtt.sendCommand(machineId, { type: 'AFT_PUMP', amount, txn_id });
-    this.leaderboard.broadcastJackpotHit(machineId, amount);
+    const videoUrl = await this.redis.get('vjp:video_url');
+    this.leaderboard.broadcastJackpotHit(machineId, amount, videoUrl || null);
 
     await this.redis.resetJackpotPool(this.floor);
     await this.generateNewHitValue();
