@@ -18,6 +18,7 @@
 
 #include "config.h"
 #include "machine_config.h"
+#include "led_indicator.h"
 #include "network/eth_manager.h"
 #include "network/mqtt_client.h"
 #include "sas/sas_polling.h"
@@ -50,6 +51,23 @@ static void uart_sas_init() {
                                         0, NULL, 0));
     ESP_LOGI(TAG, "UART%d ready: %d baud TX=%d RX=%d",
              SAS_UART_NUM, SAS_UART_BAUD, SAS_UART_TX_PIN, SAS_UART_RX_PIN);
+
+    // One-time plain 8-N-1 loopback self-test, stripped of every bit9/
+    // parity trick the SAS code layers on top. Only meaningful while
+    // TX (GPIO18) and RX (GPIO19) -- or the two V0259 TTL wires that
+    // normally land on them -- are physically jumpered together during
+    // bring-up. Isolates "does raw UART TX/RX work on this pin pair at
+    // all" from every other SAS framing question.
+    uint8_t test_tx = 0xAA;
+    uart_write_bytes(SAS_UART_NUM, (const char*)&test_tx, 1);
+    uart_wait_tx_done(SAS_UART_NUM, pdMS_TO_TICKS(20));
+    uint8_t test_rx = 0;
+    int self_test_n = uart_read_bytes(SAS_UART_NUM, &test_rx, 1, pdMS_TO_TICKS(50));
+    if (self_test_n > 0) {
+        ESP_LOGI(TAG, "UART self-test: sent 0x%02X, received 0x%02X -- loopback OK", test_tx, test_rx);
+    } else {
+        ESP_LOGW(TAG, "UART self-test: sent 0x%02X, received nothing -- loopback FAILED", test_tx);
+    }
 }
 
 // ── Arduino setup() ──────────────────────────────────────────
@@ -57,6 +75,9 @@ static void uart_sas_init() {
 void setup() {
     Serial.begin(115200);
     ESP_LOGI(TAG, "ESP32 GMI Module booting...");
+
+    // 0. Activity LEDs (D1 RED = SAS serial, D2 GREEN = Ethernet/MQTT)
+    led_indicator_init();
 
     // 1. NVS – required for machine ID, transaction persistence and ETH.h
     esp_err_t nvs_err = nvs_flash_init();

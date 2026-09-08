@@ -20,4 +20,11 @@ for (const p of cfgCandidates) {
 contextBridge.exposeInMainWorld('__config__', {
   backendUrl,
   backgroundImage: cfg.backgroundImage || './bg.jpg',
+  // Per-background-image calibration (row/column pixel positions, timer
+  // circle position/size) against the fixed 1920x1080 design canvas -- see
+  // Leaderboard.tsx DEFAULT_ROW/COL_NAME/COL_WIN/TIMER for the shape and
+  // measurement method. Omit any key (or the whole `layout` object) to keep
+  // the built-in defaults; only override what a new background image needs
+  // recalibrated. No rebuild required -- just edit this config.json.
+  layout: cfg.layout || undefined,
 });

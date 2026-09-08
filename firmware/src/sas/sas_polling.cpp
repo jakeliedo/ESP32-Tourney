@@ -33,6 +33,7 @@
 #include "crc16.h"
 #include "../../include/config.h"
 #include "../machine_config.h"
+#include "../led_indicator.h"
 
 #include <Arduino.h>
 #include <driver/uart.h>
@@ -81,6 +82,7 @@ static const char* exc_name(uint8_t exc) {
         case 0x12: return "Slot door CLOSED";
         case 0x17: return "AC power applied";
         case 0x18: return "AC power lost";
+        case 0x1F: return "No activity, waiting for player input (obsolete)";
         case 0x20: return "General tilt";
         case 0x27: return "Cashbox full detected";
         case 0x2E: return "Cashbox near full detected";
@@ -120,6 +122,16 @@ static bool     s_aft_registered      = false;
 static uint32_t s_aft_asset_number    = 0;
 static uint8_t  s_aft_registration_key[20] = {0};
 
+// Host-chosen AFT registration key (SAS 6.02 Section 8.1: "the desired
+// registration key... The final registration key must be non-zero").
+// This is picked by the host, not issued by the machine -- any fixed
+// non-zero 20-byte pattern is valid; the machine just echoes it back on
+// every subsequent LP 0x72 for us to match. Not a secret/credential.
+static const uint8_t s_aft_registration_key_init[20] = {
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+    0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14
+};
+
 // Physical machine identity (LP 0x54), queried once near boot -- see
 // query_machine_identity() and sas_polling.h for why this exists
 // separately from g_machine_id (which is just our own NVS-assigned
@@ -128,6 +140,13 @@ static uint8_t  s_aft_registration_key[20] = {0};
 static bool s_identity_known         = false;
 static char s_serial_number[41]      = {0};
 static char s_sas_version[4]         = {0};
+
+// See query_machine_denom() and sas_polling.h for why this exists --
+// raw SAS credit/meter/handpay values are all expressed in units of this
+// denomination (Section 16, Table C-4), not always cents.
+static bool     s_denom_known           = false;
+static uint8_t  s_denom_code            = 0;
+static uint32_t s_denom_value_x10000    = 0;
 
 // ── Internal UART helpers ──────────────────────────────────────
 
@@ -158,60 +177,75 @@ static void sas_send_byte(uint8_t byte, bool is_address) {
     uart_set_parity_for_bit9(byte, is_address);
     uart_write_bytes(SAS_UART_NUM, (const char*)&byte, 1);
     uart_wait_tx_done(SAS_UART_NUM, pdMS_TO_TICKS(10));
+    led_pulse_serial();  // every real byte sent on the SAS link -- see led_indicator.h
 }
 
 /**
- * Transmit a Long Poll frame with the real-hardware-verified wakeup
- * preamble (per SASPyTourney/saspy): [SAS_POLL_ADDRESS(MARK), frame[0]
- * i.e. machine address(MARK)], then the rest of frame (cmd/data/CRC)
- * as SPACE. A plain single MARK address byte (this firmware's earlier
- * approach) got ignored/echoed by real machines instead of routing
- * the poll. Always runs at 1 stop bit (restored here in case the
- * General Poll path above left the UART at 2 stop bits).
+ * Transmit a Long Poll frame per SAS 6.02 Section 2.2.2.1 (Type R):
+ * "the gaming machine address, with the wakeup bit set, followed by
+ * a single-byte command code" -- i.e. exactly ONE address byte (MARK,
+ * bit9=1), then cmd/data/CRC (SPACE, bit9=0). No extra preamble byte.
+ * A prior version of this firmware prepended a second MARK byte
+ * (SAS_POLL_ADDRESS) before the real address, which is not part of
+ * the spec and is structurally the same "two consecutive MARK bytes"
+ * pattern documented (CLAUDE.md, 2026-09 SAS debug log) to make real
+ * machines echo the poll back instead of responding to it.
+ * Always runs at 1 stop bit (restored here in case the General Poll
+ * path above left the UART at 2 stop bits).
  */
 static void sas_send_frame(const uint8_t* frame, size_t len) {
     uart_set_stop_bits(SAS_UART_NUM, UART_STOP_BITS_1);
     uart_flush(SAS_UART_NUM);
 #if SAS_LOG_RAW_FRAMES
-    // 80 bytes covers the largest frame we build (AFT request, ~78 bytes
-    // incl. preamble). hex_dump() itself only prints the first 64 bytes
-    // of whatever it's given, so a full AFT dump still gets truncated in
-    // the log -- harmless, it's just for visibility; the real bytes sent
-    // come from frame[]/len below, not this copy.
-    uint8_t logged[80];
-    logged[0] = SAS_POLL_ADDRESS;
-    size_t logged_len = len < 79 ? len : 79;
-    memcpy(logged + 1, frame, logged_len);
-    hex_dump("SAS TX", logged, logged_len + 1);
+    hex_dump("SAS TX", frame, len);
 #endif
-    sas_send_byte(SAS_POLL_ADDRESS, true);
-    sas_send_byte(frame[0], true);          // machine address – MARK
+    sas_send_byte(frame[0], true);          // machine address – MARK (wakeup bit)
     for (size_t i = 1; i < len; i++) {
         sas_send_byte(frame[i], false);     // cmd/data/CRC – SPACE
     }
 }
 
 /**
- * General Poll ("events poll"), per SASPyTourney/saspy real-hardware
- * framing: NO parity bit at all (not even our usual bit9 MARK/SPACE
- * emulation) and 2 STOP BITS, sending 2 plain 8-bit bytes:
- * [SAS_POLL_ADDRESS, 0x80 | machine_address]. The earlier approach
- * (bit9 MARK on a single machine-address byte, 1 stop bit) always got
- * echoed back unchanged by the real machine instead of a genuine
- * exception report. Returns 1 if an exception byte was read into
- * *out_exc, 0 on timeout (no exception queued -- the normal case).
+ * General Poll ("events poll") per SAS 6.02 Section 2.2.1: "the host
+ * transmits a single-byte message consisting of the gaming machine's
+ * address ORed with 80 hex with the wakeup bit set." That's exactly
+ * ONE byte, address|0x80, with a genuine bit9=1 (MARK) -- not two
+ * bytes, and not a byte sent with parity disabled (which transmits no
+ * wakeup bit at all, so the machine has no way to recognize it as an
+ * address byte per Section 1.2.1 and never responds). Returns 1 if an
+ * exception byte was read into *out_exc, 0 on timeout (no exception
+ * queued -- the normal case).
  */
+/**
+ * Send a global-broadcast address byte (0x00 | 0x80, wakeup bit set),
+ * expecting no reply. Per SAS 6.02 Section 3.3 (Synchronization), after
+ * a warm/cold start or any loop-break (Section 4.2) a gaming machine
+ * ignores every poll addressed to itself until it sees a poll to a
+ * DIFFERENT machine address, or a poll to address zero -- only then
+ * does it reset its poll-state counter and start responding. With a
+ * single machine on this bus we never poll any other address, so
+ * without this one-time broadcast the machine would silently ignore
+ * every poll forever, indistinguishable from a dead link.
+ */
+static void sas_send_sync_broadcast() {
+    uart_set_stop_bits(SAS_UART_NUM, UART_STOP_BITS_1);
+    uart_flush(SAS_UART_NUM);
+    uint8_t byte = 0x80; // address 0x00 | 0x80, wakeup bit set
+#if SAS_LOG_RAW_FRAMES
+    hex_dump("SAS TX(sync)", &byte, 1);
+#endif
+    sas_send_byte(byte, true);
+}
+
 static size_t sas_general_poll(uint8_t machine_address, uint8_t* out_exc) {
-    uart_set_parity(SAS_UART_NUM, UART_PARITY_DISABLE);
-    uart_set_stop_bits(SAS_UART_NUM, UART_STOP_BITS_2);
+    uart_set_stop_bits(SAS_UART_NUM, UART_STOP_BITS_1);
     uart_flush(SAS_UART_NUM);
 
-    uint8_t frame[2] = { SAS_POLL_ADDRESS, (uint8_t)(0x80 | machine_address) };
+    uint8_t byte = (uint8_t)(0x80 | machine_address);
 #if SAS_LOG_RAW_FRAMES
-    hex_dump("SAS TX(gp)", frame, 2);
+    hex_dump("SAS TX(gp)", &byte, 1);
 #endif
-    uart_write_bytes(SAS_UART_NUM, (const char*)frame, 2);
-    uart_wait_tx_done(SAS_UART_NUM, pdMS_TO_TICKS(10));
+    sas_send_byte(byte, true);   // single address byte, wakeup bit set
 
     // Real SAS response bytes always carry bit9=0 (see sas_receive's header
     // comment) followed by one genuine stop bit -- an 11-bit frame, same as
@@ -229,7 +263,7 @@ static size_t sas_general_poll(uint8_t machine_address, uint8_t* out_exc) {
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SAS_RESPONSE_TIMEOUT);
     while (received < 1 && xTaskGetTickCount() < deadline) {
         int n = uart_read_bytes(SAS_UART_NUM, out_exc + received, 1 - received, pdMS_TO_TICKS(2));
-        if (n > 0) received += n;
+        if (n > 0) { received += n; led_pulse_serial(); }
     }
 #if SAS_LOG_RAW_FRAMES
     if (received > 0) {
@@ -253,7 +287,7 @@ static size_t sas_receive(uint8_t* buf, size_t max_len,
     while (received < max_len && xTaskGetTickCount() < deadline) {
         int n = uart_read_bytes(SAS_UART_NUM, buf + received,
                                 max_len - received, pdMS_TO_TICKS(2));
-        if (n > 0) received += n;
+        if (n > 0) { received += n; led_pulse_serial(); }
     }
 #if SAS_LOG_RAW_FRAMES
     if (received > 0) {
@@ -335,49 +369,139 @@ static bool execute_simple_command(uint8_t sas_cmd) {
 // ── AFT registration (LP 0x73) ──────────────────────────────────
 
 /**
- * Register this host for AFT transfers, per SAS 6.02. Must succeed
- * before any LP 0x72 transfer will be accepted -- a transfer sent with
- * a guessed asset number and an all-zero Registration Key gets rejected
- * with AFT_STATUS_BAD_ASSET (0x93) regardless of whether the asset
- * number itself is correct (confirmed on real hardware 2026-09-05).
- * On success, stores the machine's authoritative asset number and the
- * Registration Key it issued -- both required on every subsequent
- * LP 0x72. Cached in s_aft_registered so this only runs once per boot.
+ * Register this host for AFT transfers, per SAS 6.02 Section 8.1. Must
+ * succeed before any LP 0x72 transfer will be accepted -- a transfer
+ * sent with an all-zero Registration Key gets rejected with
+ * AFT_STATUS_BAD_ASSET (0x93) regardless of the asset number (confirmed
+ * on real hardware 2026-09-05).
+ *
+ * This is a two-poll handshake (see AFT_REG_CODE_* in sas_commands.h
+ * for the full spec citation -- a prior version of this firmware only
+ * sent step 1 and treated "ready" as good enough, which is why every
+ * subsequent LP 0x72 carried an all-zero key and got rejected):
+ *   0. AFT_REG_CODE_QUERY (0xFF) -- read-only, asks the machine for its
+ *      own currently-configured Asset Number instead of guessing one in
+ *      config.h (SAS_AFT_ASSET_NUMBER is only a fallback if this comes
+ *      back zero/unreadable -- the machine ignores any asset number we
+ *      send in Query mode, so there was never a way to "discover" it by
+ *      trial and error on the later steps; asking directly is the actual
+ *      spec-documented way, Section 8.1: "the host may interrogate the
+ *      current registration status by setting the registration code to
+ *      FF").
+ *   1. AFT_REG_CODE_INIT (0x00), zeroed key, the asset number from step 0
+ *      -- moves the machine to registration status "ready" (0x00).
+ *   2. AFT_REG_CODE_COMPLETE (0x01), the SAME asset number, and a
+ *      host-chosen NON-ZERO key -- only this step actually completes
+ *      registration (status "registered", 0x01).
+ * Cached in s_aft_registered so this only runs once per boot.
  */
 static bool perform_aft_registration() {
     uint8_t frame[36];
     uint8_t resp[40];
     uint8_t zero_key[20] = {0};
 
-    size_t frame_len = sas_build_lp_aft_register(frame, g_machine_id, AFT_REG_CODE_REGISTER,
-                                                  SAS_AFT_ASSET_NUMBER, zero_key, 0);
+    // Step 0: Query the machine's real, currently-configured asset number.
+    uint32_t asset_number = SAS_AFT_ASSET_NUMBER;
+    size_t frame_len = sas_build_lp_aft_register(frame, g_machine_id, AFT_REG_CODE_QUERY, 0, zero_key, 0);
+    sas_send_frame(frame, frame_len);
+    size_t qn = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+    if (qn > 0) {
+        SasAftRegisterResponse q = sas_parse_aft_register(resp, qn);
+        if (q.valid && q.asset_number != 0) {
+            asset_number = q.asset_number;
+            ESP_LOGI(TAG, "AFT registration: machine reports asset number %lu (config.h has %lu)",
+                     (unsigned long)asset_number, (unsigned long)SAS_AFT_ASSET_NUMBER);
+        } else {
+            ESP_LOGW(TAG, "AFT registration: machine has no asset number configured (query returned 0) "
+                           "-- an operator must set one in the audit menu; falling back to config.h value %lu",
+                     (unsigned long)SAS_AFT_ASSET_NUMBER);
+        }
+    } else {
+        ESP_LOGW(TAG, "AFT registration: asset number query got no response, falling back to config.h value %lu",
+                 (unsigned long)SAS_AFT_ASSET_NUMBER);
+    }
+
+    // Step 1: Initialize
+    frame_len = sas_build_lp_aft_register(frame, g_machine_id, AFT_REG_CODE_INIT,
+                                           asset_number, zero_key, 0);
     sas_send_frame(frame, frame_len);
     size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
-
     if (n == 0) {
-        ESP_LOGW(TAG, "AFT registration: no response from machine");
+        ESP_LOGW(TAG, "AFT registration step 1 (init): no response from machine");
         return false;
     }
-
     SasAftRegisterResponse reg = sas_parse_aft_register(resp, n);
     if (!reg.valid) {
-        ESP_LOGW(TAG, "AFT registration: response CRC/parse error (n=%d)", (int)n);
+        ESP_LOGW(TAG, "AFT registration step 1 (init): response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+    if (reg.status_code != AFT_REG_STATUS_READY) {
+        ESP_LOGW(TAG, "AFT registration step 1 (init): machine returned status 0x%02X (expected ready)",
+                 reg.status_code);
         return false;
     }
 
-    if (reg.status_code == AFT_REG_STATUS_READY || reg.status_code == AFT_REG_STATUS_REGISTERED) {
-        s_aft_asset_number = reg.asset_number;
-        memcpy(s_aft_registration_key, reg.registration_key, 20);
-        s_aft_registered = true;
-        ESP_LOGI(TAG, "AFT registration OK: asset=%lu", (unsigned long)reg.asset_number);
-        return true;
+    // Step 2: Complete, with a host-chosen non-zero key
+    frame_len = sas_build_lp_aft_register(frame, g_machine_id, AFT_REG_CODE_COMPLETE,
+                                           asset_number, s_aft_registration_key_init, 0);
+    sas_send_frame(frame, frame_len);
+    n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+    if (n == 0) {
+        ESP_LOGW(TAG, "AFT registration step 2 (complete): no response from machine");
+        return false;
+    }
+    reg = sas_parse_aft_register(resp, n);
+    if (!reg.valid) {
+        ESP_LOGW(TAG, "AFT registration step 2 (complete): response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+    if (reg.status_code != AFT_REG_STATUS_REGISTERED) {
+        ESP_LOGW(TAG, "AFT registration step 2 (complete): machine returned status 0x%02X (expected registered)",
+                 reg.status_code);
+        return false;
     }
 
-    ESP_LOGW(TAG, "AFT registration: machine returned status 0x%02X (not ready)", reg.status_code);
-    return false;
+    s_aft_asset_number = reg.asset_number;
+    memcpy(s_aft_registration_key, s_aft_registration_key_init, 20);
+    s_aft_registered = true;
+    ESP_LOGI(TAG, "AFT registration OK: asset=%lu", (unsigned long)reg.asset_number);
+    return true;
 }
 
 // ── AFT execution ──────────────────────────────────────────────
+
+// How long we're willing to block the SAS task retrieving the final
+// status of a transfer that came back "pending" (0x40). Per spec, the
+// machine keeps reporting exception 0x69 every 15s until acknowledged,
+// so giving up here just means we'll pick up the pending state again on
+// exception 0x69 or the next AFT command's flush step below -- it does
+// NOT lose the transaction (NVS still has it, and the machine still has
+// its own record of it).
+#define AFT_INTERROGATE_MAX_ATTEMPTS 15
+#define AFT_INTERROGATE_INTERVAL_MS  300
+
+/**
+ * Send one AFT interrogation poll with transfer_code=0xFF (interrogate +
+ * ACKNOWLEDGE). Per SAS 6.02 Section 8.3, this is the ONLY transfer code
+ * that closes a pending (0x40) transfer cycle -- 0xFE ("peek") does not.
+ * Safe to call even when there is no pending transfer: the machine just
+ * reports the status of the most recent one (harmless, no side effect on
+ * an already-closed cycle).
+ * @return true if a valid response was parsed into *out
+ */
+static bool interrogate_aft_ack(SasAftResponse* out) {
+    uint8_t frame[96];
+    uint8_t resp[128];
+    size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
+                                         AFT_CODE_INTERROGATE_ACK, AFT_XFER_TO_MACHINE,
+                                         AFT_AMOUNT_CASHABLE, 0, "",
+                                         s_aft_asset_number, s_aft_registration_key);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+    if (n == 0) return false;
+    *out = sas_parse_aft(resp, n);
+    return out->valid;
+}
 
 static void execute_aft_command(const ServerCommand* cmd) {
     // AFT (LP 0x72) request/response frames are much larger than other
@@ -397,16 +521,105 @@ static void execute_aft_command(const ServerCommand* cmd) {
         return;
     }
 
-    uint8_t transfer_code = (cmd->cmd_type == CMD_AFT_WITHDRAW)
-                                ? AFT_CODE_TRANSFER_PARTIAL
-                                : AFT_CODE_TRANSFER_FULL;
+    // Discovered 2026-09-08: after a real $1 buy-in got status 0x40
+    // (pending), every subsequent AFT_WITHDRAW attempt was rejected with
+    // status 0xC0 ("not compatible with current transfer in progress"),
+    // repeated across 7 separate button presses over ~25 seconds -- long
+    // enough that the machine had almost certainly already resolved that
+    // transfer internally (to success), but it stays "open" from the
+    // host's point of view until acknowledged with an interrogation poll
+    // (transfer code FF). "If the host sends any long poll 72 during a
+    // transfer cycle, other than an interrogation poll..., the gaming
+    // machine will respond with a transfer status of C0" (spec text,
+    // Section 8.3). So: always flush/acknowledge whatever the machine
+    // considers its current transfer before starting a new one. This is
+    // a no-op (harmless) if there's nothing pending.
+    SasAftResponse flush_result;
+    if (interrogate_aft_ack(&flush_result) && flush_result.status_code == AFT_STATUS_PENDING) {
+        ESP_LOGW(TAG, "AFT: prior transfer still pending at start of new command, "
+                      "waiting for it to close before proceeding  txn=%s", cmd->txn_id);
+        for (int attempt = 0; attempt < AFT_INTERROGATE_MAX_ATTEMPTS; attempt++) {
+            vTaskDelay(pdMS_TO_TICKS(AFT_INTERROGATE_INTERVAL_MS));
+            if (interrogate_aft_ack(&flush_result) && flush_result.status_code != AFT_STATUS_PENDING) {
+                ESP_LOGI(TAG, "AFT: prior transfer closed with status=0x%02X, proceeding",
+                         flush_result.status_code);
+                break;
+            }
+        }
+    }
+
+    // Transfer type selects the real SAS direction/purpose (Table 8.3d):
+    // PUMP is host->machine (0x00); WITHDRAW must be machine->host (0x80),
+    // not a "restricted" code -- a prior version of this firmware used
+    // AFT_TYPE_RESTRICTED (0x10, "bonus coin-out TO the machine") for
+    // withdraw, which doesn't take money out of the machine at all.
     uint8_t transfer_type = (cmd->cmd_type == CMD_AFT_PUMP)
-                                ? AFT_TYPE_CASHABLE
-                                : AFT_TYPE_RESTRICTED;
+                                ? AFT_XFER_TO_MACHINE
+                                : AFT_XFER_FROM_MACHINE;
+    uint8_t amount_category = AFT_AMOUNT_CASHABLE;
+    uint8_t  transfer_code;
+    uint32_t transfer_amount;
+
+    if (cmd->cmd_type == CMD_AFT_WITHDRAW) {
+        // Discovered 2026-09-08 on real hardware: the standard "request
+        // all available credits" method (spec Section 8.4 -- set amount
+        // to 9999999999, transfer code = partial allowed) got rejected
+        // outright with status 0x86 ("gaming machine unable to perform
+        // partial transfers to the host") on every attempt. This is a
+        // real, spec-acknowledged machine limitation, not a framing bug:
+        // "Due to jurisdictional or other considerations, some gaming
+        // machines may refuse to perform partial transfers even if the
+        // host specifies partial transfer allowed" (Section 8.3).
+        //
+        // Fix: query LP 0x74 (AFT Game Lock and Status) first -- Table
+        // 8.2b's "current cashable amount" is the machine's own live
+        // balance, reported ALREADY IN CENTS (unlike the LP 0x1A credit
+        // meter, which is in accounting-denom units -- see
+        // credits_to_cents()). Requesting a FULL transfer (code 0x00) for
+        // that EXACT amount never needs partial-transfer support at all,
+        // since a full transfer for the precise current balance isn't a
+        // partial transfer by definition.
+        uint8_t  lp74_frame[8];
+        uint8_t  lp74_resp[48];
+        size_t   lp74_len = sas_build_lp_aft_lock_status(lp74_frame, g_machine_id,
+                                                           AFT_LOCK_CODE_INTERROGATE, 0, 0);
+        sas_send_frame(lp74_frame, lp74_len);
+        size_t lp74_n = sas_receive(lp74_resp, sizeof(lp74_resp), SAS_LONG_POLL_TIMEOUT);
+        SasAftLockStatusResponse lock_status = (lp74_n > 0)
+            ? sas_parse_aft_lock_status(lp74_resp, lp74_n)
+            : SasAftLockStatusResponse{0, 0xFF, 0, 0, 0, 0, 0, 0, false};
+
+        if (!lock_status.valid) {
+            ESP_LOGW(TAG, "AFT OUT: LP 0x74 status query failed (n=%d), aborting withdraw  txn=%s",
+                     (int)lp74_n, cmd->txn_id);
+            return;
+        }
+        if (!(lock_status.available_transfers & 0x02)) {
+            ESP_LOGW(TAG, "AFT OUT: machine reports \"transfer from gaming machine\" NOT currently "
+                          "available (door open/tilt/disabled/cashout in progress?)  txn=%s", cmd->txn_id);
+        }
+        if (lock_status.current_cashable_amount == 0) {
+            ESP_LOGI(TAG, "AFT OUT: machine reports 0 cashable cents, nothing to withdraw  txn=%s",
+                     cmd->txn_id);
+            nvs_clear_pending_txn();
+            return;
+        }
+        ESP_LOGI(TAG, "AFT OUT: machine reports %lu cents cashable (partial-to-host %s), "
+                      "requesting exact full transfer  txn=%s",
+                 (unsigned long)lock_status.current_cashable_amount,
+                 (lock_status.host_cashout_status & 0x02) ? "supported" : "NOT supported",
+                 cmd->txn_id);
+
+        transfer_code   = AFT_CODE_TRANSFER_FULL;
+        transfer_amount = lock_status.current_cashable_amount;
+    } else {
+        transfer_code   = AFT_CODE_TRANSFER_FULL;
+        transfer_amount = cmd->amount;
+    }
 
     size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
-                                         transfer_code, transfer_type,
-                                         cmd->amount, cmd->txn_id,
+                                         transfer_code, transfer_type, amount_category,
+                                         transfer_amount, cmd->txn_id,
                                          s_aft_asset_number, s_aft_registration_key);
     sas_send_frame(frame, frame_len);
     size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
@@ -414,16 +627,48 @@ static void execute_aft_command(const ServerCommand* cmd) {
     if (n > 0) {
         SasAftResponse aft = sas_parse_aft(resp, n);
         if (aft.valid) {
-            if (aft.status_code == AFT_STATUS_SUCCESS) {
+            uint8_t  final_status = aft.status_code;
+            uint32_t final_amount = aft.transfer_amount;
+
+            // Status 0x40 (PENDING) is NOT a failure -- it means the
+            // transfer is still in progress. Discovered 2026-09-08: a
+            // real $1 buy-in that returned 0x40 here physically succeeded
+            // on the machine seconds later, but this code used to log it
+            // as "AFT FAIL" and never checked again. Per Section 8.3, the
+            // host must follow up with interrogation poll(s) (transfer
+            // code FF) until the status transitions to a final code.
+            if (final_status == AFT_STATUS_PENDING) {
+                bool resolved = false;
+                for (int attempt = 0; attempt < AFT_INTERROGATE_MAX_ATTEMPTS; attempt++) {
+                    vTaskDelay(pdMS_TO_TICKS(AFT_INTERROGATE_INTERVAL_MS));
+                    SasAftResponse iaft;
+                    if (interrogate_aft_ack(&iaft) && iaft.status_code != AFT_STATUS_PENDING) {
+                        final_status = iaft.status_code;
+                        final_amount = iaft.transfer_amount;
+                        resolved = true;
+                        break;
+                    }
+                }
+                if (!resolved) {
+                    ESP_LOGW(TAG, "AFT: still pending after %d interrogation attempts (%.1fs), "
+                                  "giving up for now -- machine will keep reissuing exception 0x69 "
+                                  "until acknowledged  txn=%s",
+                             AFT_INTERROGATE_MAX_ATTEMPTS,
+                             AFT_INTERROGATE_MAX_ATTEMPTS * AFT_INTERROGATE_INTERVAL_MS / 1000.0f,
+                             cmd->txn_id);
+                }
+            }
+
+            if (final_status == AFT_STATUS_SUCCESS || final_status == AFT_STATUS_PARTIAL) {
                 nvs_clear_pending_txn();
                 ESP_LOGI(TAG, "AFT OK: transferred %lu credits  txn=%s",
-                         (unsigned long)aft.transfer_amount, cmd->txn_id);
-            } else {
+                         (unsigned long)final_amount, cmd->txn_id);
+            } else if (final_status != AFT_STATUS_PENDING) {
                 ESP_LOGW(TAG, "AFT FAIL: status=0x%02X  txn=%s",
-                         aft.status_code, cmd->txn_id);
+                         final_status, cmd->txn_id);
             }
             report_event(SAS_EXC_AFT_TRANSFER_DONE, 0, 0, 0,
-                         aft.status_code, cmd->txn_id);
+                         final_status, cmd->txn_id);
         } else {
             ESP_LOGW(TAG, "AFT: response CRC/parse error  n=%d  txn=%s",
                      (int)n, cmd->txn_id);
@@ -467,6 +712,127 @@ static bool query_machine_identity() {
     return true;
 }
 
+// ── Real accounting denomination (LP 0x1F) ──────────────────────
+
+/**
+ * Query the real machine's accounting denomination once near boot. Every
+ * plain SAS credit value (LP 0x1A credits, LP 0x1B handpay amount, LP
+ * 0xAF/0x6F meters) is expressed in units of this denomination, NOT
+ * always cents -- see SasMachineInfoResponse doc comment in
+ * sas_commands.h. Safe to call repeatedly; only updates state on a valid
+ * response.
+ */
+static bool query_machine_denom() {
+    uint8_t frame[4];
+    uint8_t resp[32];
+
+    size_t frame_len = sas_build_lp_machine_info(frame, g_machine_id);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+
+    if (n == 0) {
+        ESP_LOGW(TAG, "Machine denom: no response from machine");
+        return false;
+    }
+
+    SasMachineInfoResponse info = sas_parse_machine_info(resp, n);
+    if (!info.valid) {
+        ESP_LOGW(TAG, "Machine denom: response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+
+    if (info.denom_value_x10000 == 0) {
+        ESP_LOGW(TAG, "Machine denom: code 0x%02X is \"none\"/unknown/reserved -- "
+                      "falling back to no conversion (raw credit units treated as cents)",
+                 info.denom_code);
+        return false;
+    }
+
+    s_denom_code         = info.denom_code;
+    s_denom_value_x10000 = info.denom_value_x10000;
+    s_denom_known        = true;
+    ESP_LOGI(TAG, "Machine denom: code=0x%02X = $%lu.%04lu per credit",
+             s_denom_code,
+             (unsigned long)(s_denom_value_x10000 / 10000),
+             (unsigned long)(s_denom_value_x10000 % 10000));
+    return true;
+}
+
+/**
+ * Convert a raw SAS credit-unit value (credit meter, handpay amount,
+ * coin in/out meters -- anything the spec calls plain "credits") into
+ * cents, using the real queried denomination. Falls back to treating the
+ * raw value as already-cents (this project's old hardcoded assumption)
+ * if the denom hasn't been successfully queried yet, so behavior on a
+ * 1-cent machine (the only one tested so far) is unchanged.
+ */
+static uint32_t credits_to_cents(uint32_t raw_credits) {
+    if (!s_denom_known) return raw_credits;
+    // cents = raw_credits * (dollars_x10000) / 10000 * 100 = raw_credits * dollars_x10000 / 100
+    return (uint32_t)(((uint64_t)raw_credits * s_denom_value_x10000) / 100);
+}
+
+// ── Ticket lockdown (LP 0x7B) ────────────────────────────────────
+
+/**
+ * Disallow ticket-based cashout/redemption on the machine, once near boot.
+ * Requirement (2026-09-08): while this EVO bridge is the active host, AFT
+ * is meant to be the ONLY way credits leave/enter the machine -- a printed
+ * cashout ticket or a redeemed ticket-in would move money without going
+ * through our AFT/tournament tracking at all. LP 0x7B (Extended Validation
+ * Status, Section 15.2) is the real SAS mechanism for this:
+ *   - bit 0 (printer as cashout device) covers BOTH cashable AND
+ *     restricted ticket cashouts per the spec text -- disabling it alone
+ *     already blocks all player-initiated ticket printing.
+ *   - bit 3 (print restricted tickets) is set too, redundantly but
+ *     harmlessly, for defense in depth (belt and suspenders).
+ *   - bit 5 (ticket redemption) blocks the machine from ACCEPTING a
+ *     ticket a player inserts, so this bridge stays the exclusive channel
+ *     in both directions.
+ * Bits not in control_mask (handpay receipt printing/validation) are left
+ * untouched -- this is specifically about player ticket cashout, not
+ * handpay paperwork.
+ * NOTE: this is a persistent machine-side configuration write, not a
+ * continuously-held lock -- it does NOT automatically revert if this board
+ * loses power or disconnects. Re-enabling ticket cashout (e.g. to return
+ * the machine to standalone operation) requires another LP 0x7B (or an
+ * operator menu option, if the machine provides one) setting those bits
+ * back to 1.
+ */
+static bool configure_ticket_lockdown() {
+    uint8_t frame[13];
+    uint8_t resp[24];
+
+    const uint16_t control_mask = VALIDATION_BIT_PRINTER_CASHOUT
+                                 | VALIDATION_BIT_PRINT_RESTRICTED
+                                 | VALIDATION_BIT_TICKET_REDEMPTION;
+    const uint16_t status_bits  = 0x0000;  // disallow all three controlled bits
+
+    size_t frame_len = sas_build_lp_validation_status(frame, g_machine_id,
+                                                       control_mask, status_bits, 0, 0);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+
+    if (n == 0) {
+        ESP_LOGW(TAG, "Ticket lockdown: no response from machine");
+        return false;
+    }
+
+    SasValidationStatusResponse st = sas_parse_validation_status(resp, n);
+    if (!st.valid) {
+        ESP_LOGW(TAG, "Ticket lockdown: response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Ticket lockdown: applied (status_bits=0x%04X) -- "
+                  "printer-cashout=%d  restricted-tickets=%d  ticket-redemption=%d",
+             st.status_bits,
+             (st.status_bits & VALIDATION_BIT_PRINTER_CASHOUT)   ? 1 : 0,
+             (st.status_bits & VALIDATION_BIT_PRINT_RESTRICTED)  ? 1 : 0,
+             (st.status_bits & VALIDATION_BIT_TICKET_REDEMPTION) ? 1 : 0);
+    return true;
+}
+
 // ── Recovery on boot: check if a pending AFT exists in NVS ────
 
 static void recover_pending_aft() {
@@ -489,22 +855,28 @@ static void recover_pending_aft() {
         return;
     }
 
-    // Interrogate the machine to see if it already received the funds
-    // (see execute_aft_command() for why these are 96/128, not 32)
-    uint8_t frame[96], resp[128];
-    size_t frame_len = sas_build_lp_aft(frame, g_machine_id,
-                                         AFT_CODE_INTERROGATE, AFT_TYPE_CASHABLE,
-                                         0, txn_id,
-                                         s_aft_asset_number, s_aft_registration_key);
-    sas_send_frame(frame, frame_len);
-    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
-    if (n > 0) {
-        SasAftResponse aft = sas_parse_aft(resp, n);
-        if (aft.valid && aft.status_code == AFT_STATUS_SUCCESS) {
+    // Interrogate + ACKNOWLEDGE (transfer code FF, not FE) to see if the
+    // machine already received the funds. This MUST be FF, not a bare
+    // "peek" -- otherwise a transfer that resolved to pending (0x40)
+    // before reboot stays open from the machine's point of view forever,
+    // and every future AFT (including this recovery's own retry below)
+    // gets rejected with 0xC0 (see AFT_CODE_INTERROGATE_ACK doc comment
+    // in sas_commands.h, and interrogate_aft_ack()/execute_aft_command()
+    // above for the full story of how this was discovered 2026-09-08).
+    SasAftResponse aft;
+    bool got_response = interrogate_aft_ack(&aft);
+    for (int attempt = 0; got_response && aft.status_code == AFT_STATUS_PENDING
+                          && attempt < AFT_INTERROGATE_MAX_ATTEMPTS; attempt++) {
+        vTaskDelay(pdMS_TO_TICKS(AFT_INTERROGATE_INTERVAL_MS));
+        got_response = interrogate_aft_ack(&aft);
+    }
+    if (got_response) {
+        if (aft.status_code == AFT_STATUS_SUCCESS || aft.status_code == AFT_STATUS_PARTIAL) {
             ESP_LOGI(TAG, "Recovery: machine already received funds, clearing NVS");
             nvs_clear_pending_txn();
         } else {
-            ESP_LOGW(TAG, "Recovery: machine did NOT receive funds, will re-send");
+            ESP_LOGW(TAG, "Recovery: machine did NOT receive funds (status=0x%02X), will re-send",
+                     aft.status_code);
             ServerCommand retry_cmd;
             retry_cmd.cmd_type = CMD_AFT_PUMP;
             retry_cmd.amount   = amount;
@@ -525,14 +897,28 @@ void sas_polling_task(void* pvParameters) {
     uint32_t last_coin_in  = 0;
     uint32_t last_coin_out = 0;
 
+    // Synchronize to the machine's poll cycle (SAS 6.02 Section 3.3)
+    // before anything else -- see sas_send_sync_broadcast() for why.
+    // Without this, the machine ignores every poll addressed to us,
+    // forever, on this single-machine bus.
+    vTaskDelay(pdMS_TO_TICKS(500));
+    sas_send_sync_broadcast();
+
     // Query the real machine's identity once, before anything else --
     // see query_machine_identity() for why. A few retries here since
     // this only needs to succeed once ever (not every boot matters as
     // much as getting it eventually), and the link may still be settling
     // right after power-up.
-    vTaskDelay(pdMS_TO_TICKS(500));
     for (int attempt = 0; attempt < 3 && !s_identity_known; attempt++) {
         query_machine_identity();
+    }
+    for (int attempt = 0; attempt < 3 && !s_denom_known; attempt++) {
+        query_machine_denom();
+    }
+    // Lock down ticket cashout/redemption -- see configure_ticket_lockdown()
+    // for why. A few retries for the same reason as the queries above.
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (configure_ticket_lockdown()) break;
     }
 
     // Check for pending transaction from previous power cycle
@@ -551,6 +937,19 @@ void sas_polling_task(void* pvParameters) {
                     execute_aft_command(&cmd);
                     break;
                 case CMD_AFT_WITHDRAW:
+                    // Added 2026-09-08 per explicit requirement: a disabled
+                    // machine (admin pressed DISABLE -- LP 0x01 Shutdown +
+                    // LP 0x07 Disable Bill) must not also accept an AFT
+                    // withdrawal. Checked here (not just in the backend)
+                    // because this firmware state is the authoritative
+                    // real-time truth -- the backend's DB copy of "disabled"
+                    // can be stale by up to a poll cycle.
+                    if (s_state == SLOT_STATE_DISABLED) {
+                        ESP_LOGW(TAG, "AFT OUT rejected: machine is DISABLED  txn=%s", cmd.txn_id);
+                        report_event(SAS_EXC_AFT_TRANSFER_DONE, 0, 0, 0,
+                                     AFT_STATUS_BUSY, cmd.txn_id);
+                        break;
+                    }
                     ESP_LOGI(TAG, "AFT OUT recv: amount=%lu credits  txn=%s",
                              (unsigned long)cmd.amount, cmd.txn_id);
                     execute_aft_command(&cmd);
@@ -622,10 +1021,11 @@ void sas_polling_task(void* pvParameters) {
                     if (hn > 0) {
                         SasHandpayResponse hp = sas_parse_handpay(resp_buf, hn);
                         if (hp.valid) {
+                            uint32_t hp_cents = credits_to_cents(hp.handpay_amount);
                             ESP_LOGW(TAG, "EXC 0x44: HANDPAY pending – amount=%lu ($%.2f)",
                                      (unsigned long)hp.handpay_amount,
-                                     hp.handpay_amount / 100.0f);
-                            report_event(exception, hp.handpay_amount, 0, 0, 0, NULL);
+                                     hp_cents / 100.0f);
+                            report_event(exception, hp_cents, 0, 0, 0, NULL);
                         }
                     } else {
                         ESP_LOGW(TAG, "EXC 0x44: HANDPAY pending – no amount response");
@@ -657,12 +1057,13 @@ void sas_polling_task(void* pvParameters) {
                     s_state = SLOT_STATE_IDLE;
                     ESP_LOGI(TAG, "Machine online → IDLE");
                 }
-                if (cr.credits != last_credits) {
-                    int32_t delta = (int32_t)cr.credits - (int32_t)last_credits;
-                    ESP_LOGI(TAG, "Credits: %lu (%+ld)  $%.2f",
-                             (unsigned long)cr.credits, (long)delta,
-                             cr.credits / 100.0f);
-                    last_credits = cr.credits;
+                uint32_t cr_cents = credits_to_cents(cr.credits);
+                if (cr_cents != last_credits) {
+                    int32_t delta = (int32_t)cr_cents - (int32_t)last_credits;
+                    ESP_LOGI(TAG, "Credits: %lu raw (denom-converted %lu) (%+ld)  $%.2f",
+                             (unsigned long)cr.credits, (unsigned long)cr_cents, (long)delta,
+                             cr_cents / 100.0f);
+                    last_credits = cr_cents;
                 }
             } else {
                 ESP_LOGW(TAG, "Credits poll: response CRC/parse error (n=%d)", (int)n);
@@ -684,14 +1085,16 @@ void sas_polling_task(void* pvParameters) {
             if (n > 0) {
                 SasMetersResponse mr = sas_parse_meters(resp_buf, n);
                 if (mr.valid) {
-                    if (mr.coin_in != last_coin_in || mr.coin_out != last_coin_out) {
+                    uint32_t coin_in_cents  = credits_to_cents(mr.coin_in);
+                    uint32_t coin_out_cents = credits_to_cents(mr.coin_out);
+                    if (coin_in_cents != last_coin_in || coin_out_cents != last_coin_out) {
                         ESP_LOGI(TAG, "Meters: coin_in=%lu ($%.2f)  coin_out=%lu ($%.2f)  played=%lu",
-                                 (unsigned long)mr.coin_in,  mr.coin_in  / 100.0f,
-                                 (unsigned long)mr.coin_out, mr.coin_out / 100.0f,
+                                 (unsigned long)coin_in_cents,  coin_in_cents  / 100.0f,
+                                 (unsigned long)coin_out_cents, coin_out_cents / 100.0f,
                                  (unsigned long)mr.games_played);
                     }
-                    last_coin_in  = mr.coin_in;
-                    last_coin_out = mr.coin_out;
+                    last_coin_in  = coin_in_cents;
+                    last_coin_out = coin_out_cents;
                     report_event(SAS_EXC_NO_ACTIVITY, last_credits,
                                  last_coin_in, last_coin_out, 0, NULL);
                 } else {
@@ -730,6 +1133,18 @@ bool sas_identity_known() {
 
 const char* sas_get_serial_number() {
     return s_serial_number;
+}
+
+bool sas_denom_known() {
+    return s_denom_known;
+}
+
+uint8_t sas_get_denom_code() {
+    return s_denom_code;
+}
+
+uint32_t sas_get_denom_value_x10000() {
+    return s_denom_value_x10000;
 }
 
 const char* sas_get_sas_version() {

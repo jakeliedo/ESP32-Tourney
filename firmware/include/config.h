@@ -40,6 +40,17 @@
 #define SAS_UART_RX_PIN 19
 #define SAS_UART_BUF    512
 
+// ──────────────────────────────────────────────────────────────
+// Activity LEDs (onboard D1/D2, schematic-confirmed -- see
+// hardware/WT32-ETH01-EVO-Datasheet-V2.0EN.pdf and test_led/main.cpp).
+// Active-LOW (driven through a 1K pull to +3V3): digitalWrite(pin, LOW)
+// = on. GPIO2 doubles as EXT_TXD/RS485 -- unused by this project (SAS
+// uses UART1 GPIO18/19 via external MAX3232, not the onboard RS485 port),
+// so it's free to dedicate to the LED, per its own documented role above.
+// ──────────────────────────────────────────────────────────────
+#define LED_SERIAL_PIN  5   // D1 RED   – SAS UART (RS232 to slot machine) activity
+#define LED_NETWORK_PIN 2   // D2 GREEN – Ethernet/MQTT (switch) activity
+
 // Polling cycle must not exceed 40 ms (SAS 6.0x requirement)
 #define SAS_POLL_INTERVAL_MS  40
 // Max retries before marking machine offline
@@ -64,15 +75,6 @@
 // SAS Machine Address – derived at runtime from NVS machine_id.
 // g_machine_id (uint8_t) is set by machine_config_init().
 // ──────────────────────────────────────────────────────────────
-
-// Fixed "wakeup" poll address, sent as a preamble byte before the real
-// machine address on every SAS exchange. Confirmed against SASPyTourney
-// (github.com/jakeliedo/SASpyTourney, using the community `saspy`
-// library) as the real-hardware-verified value most EGMs expect --
-// 0x00-0x01 alone (what this firmware used to send) let real machines
-// echo/ignore the poll instead of reporting exceptions. Try 0x80 if
-// 0x82 doesn't work on a given machine.
-#define SAS_POLL_ADDRESS  0x82
 
 // AFT (LP 0x72) Asset Number -- a 4-byte value some machines validate
 // the transfer request against (SAS 6.02 status 0x93 "Asset number zero

@@ -78,3 +78,16 @@ SlotState sas_get_state();
 bool        sas_identity_known();
 const char* sas_get_serial_number();
 const char* sas_get_sas_version();
+
+/**
+ * Real accounting denomination, queried once via LP 0x1F near boot (see
+ * sas_polling.cpp's query_machine_denom()). sas_denom_known() returns
+ * false until the query has succeeded; sas_get_denom_value_x10000()
+ * returns 0 until then -- callers must not treat 0 as "1 cent", it means
+ * "not yet known, don't convert". See SasMachineInfoResponse in
+ * sas_commands.h for why this matters (credits are in denom units, not
+ * always cents).
+ */
+bool     sas_denom_known();
+uint8_t  sas_get_denom_code();
+uint32_t sas_get_denom_value_x10000();

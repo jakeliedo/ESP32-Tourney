@@ -15,6 +15,7 @@
 #include "../../include/config.h"
 #include "../machine_config.h"
 #include "../sas/sas_polling.h"
+#include "../led_indicator.h"
 
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
@@ -36,6 +37,7 @@ static bool s_identity_published = false;
 // ── MQTT incoming message callback ────────────────────────────
 
 static void on_message(char* topic, uint8_t* payload, unsigned int length) {
+    led_pulse_network();  // real inbound MQTT traffic -- see led_indicator.h
     if (strcmp(topic, g_topic_commands) != 0) return;
 
     // Parse JSON command from server
@@ -138,6 +140,7 @@ static void serialize_and_publish(const MachineEvent* ev) {
     char buf[256];
     serializeJson(doc, buf, sizeof(buf));
     s_mqtt.publish(g_topic_telemetry, buf);
+    led_pulse_network();  // real outbound MQTT traffic -- see led_indicator.h
 }
 
 // ── Network Task main loop (Core 0) ───────────────────────────

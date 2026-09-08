@@ -66,7 +66,7 @@ React Frontends
 | Backend jackpot | ✅ Hoạt động | |
 | Scoring logic | ✅ Credits-based | Score = credits hiện tại (không phải coin_in delta) |
 | Frontend control-panel | ✅ Hoàn chỉnh | Tabbed panel: Machines / History / Players |
-| Frontend leaderboard (:5174) | ✅ Hoàn chỉnh | Xóa máy offline khỏi bảng |
+| Frontend leaderboard (:5174) | ✅ Hoàn chỉnh | Xóa máy offline khỏi bảng. **(2026-09-08)** Toàn bộ overlay (số, hàng, timer, jackpot panel) render trong 1 canvas cố định 1920×1080, scale bằng CSS `transform:scale()` theo tỷ lệ màn hình thật (`Math.max(vw/1920,vh/1080)`) — xem `Leaderboard.tsx` (`CANVAS_W/H`, `useCanvasScale()`, hàm `pxw()`). Tọa độ ROW/COL_NAME/COL_WIN/TIMER override được qua `electron/config.json` (`layout` key) khi đổi ảnh nền khác, không cần sửa code/build lại — nhưng vẫn cần đo lại tọa độ 1 lần cho mỗi ảnh mới. |
 | TypeORM migrations | ⚠️ Chưa có | Dev dùng `synchronize: true` |
 | SAS end-to-end với máy slot thật | ✅ Đã test thành công (2026-09-05) | General Poll + Credits (LP 0x1A) đọc đúng, CRC valid. Xem mục **"Nhật ký debug SAS với máy thật (2026-09)"** phía dưới để biết toàn bộ lỗi đã gặp và cách sửa. Meters (LP 0xAF) vẫn chưa có phản hồi từ máy — xem "Việc còn tồn đọng" cuối mục đó. |
 
@@ -149,6 +149,8 @@ Backend cập nhật DB status = SUCCESS | FAILED (aft_status_code)
 - **TypeORM `synchronize: true` chỉ ở dev** – production dùng migrations.
 - **Jackpot hit_value là bí mật** – không log ra ngoài.
 - **`end()` / `cancel()` atomic** – `UPDATE WHERE status=ACTIVE`; nếu `affected=0` return ngay.
+- **DISABLED không được AFT_WITHDRAW** – chặn ở cả firmware (`s_state==SLOT_STATE_DISABLED`) và backend (check DB status trước khi gửi MQTT). Xem mục "AFT / Denomination / Ticket Control" bên dưới.
+- **Tiền/cent: luôn `Math.round()`, không bao giờ `Math.floor()`/`parseInt()`** khi convert dollar↔cents hoặc có phép nhân/chia float. Xem mục "AFT / Denomination / Ticket Control" bên dưới.
 
 ---
 
@@ -253,13 +255,13 @@ UART0 (GPIO1/GPIO3 trên debug header) dùng riêng cho Serial monitor và flash
 
 ### LED onboard (xác nhận từ schematic + thực nghiệm)
 
-| Component | GPIO | Màu | Kết nối | Logic |
-|---|---|---|---|---|
-| D1 | **5** | ĐỎ | EXT_RXD → 1KΩ → +3V3 | Active-LOW |
-| D2 | **2** | XANH | EXT_TXD → 1KΩ → +3V3 | Active-LOW |
-| D3 | — | ĐỎ | +3V3 → 1KΩ | Power indicator, luôn sáng |
+| Component | GPIO | Màu | Kết nối | Logic | Firmware (2026-09-08) |
+|---|---|---|---|---|---|
+| D1 | **5** | ĐỎ | EXT_RXD → 1KΩ → +3V3 | Active-LOW | Activity LED — **serial SAS**: toggle mỗi byte TX/RX thật trên UART1 (`src/led_indicator.h/.cpp`, `LED_SERIAL_PIN`) |
+| D2 | **2** | XANH | EXT_TXD → 1KΩ → +3V3 | Active-LOW | Activity LED — **mạng/MQTT**: toggle mỗi lần publish/nhận MQTT thật (`LED_NETWORK_PIN`) |
+| D3 | — | ĐỎ | +3V3 → 1KΩ | Power indicator, luôn sáng | Không điều khiển được (không có GPIO) |
 
-`analogWrite(pin, 0)` = full brightness, `analogWrite(pin, 255)` = tắt.
+`analogWrite(pin, 0)` = full brightness, `analogWrite(pin, 255)` = tắt (dùng ở `test_led/` smoke test). Firmware chính dùng `digitalWrite` toggle đơn giản (on/off), không PWM — xem `led_indicator.h` để biết vì sao chọn "toggle mỗi sự kiện" thay vì "bật rồi hẹn giờ tắt".
 
 ### EXT Port (RS485 onboard — không dùng cho SAS)
 
@@ -409,6 +411,8 @@ Máy slot GND ─────┤
 
 Phiên làm việc 2026-09-04 → 2026-09-05: lần đầu đấu nối và đọc dữ liệu SAS từ **máy slot thật** (trước đó chỉ test loopback/giả lập). Ghi lại đầy đủ ở đây vì hành trình debug dài, nhiều lần đoán sai hướng — mục đích để **lần sau (máy khác, hoặc cùng máy) không phải lặp lại từ đầu.**
 
+> **CẬP NHẬT (2026-09-08) — mục "3. General Poll dùng framing sai chuẩn" bên dưới mô tả một bước debug TRUNG GIAN, không phải hành vi cuối cùng hiện tại.** Cơ chế 2-byte `[SAS_POLL_ADDRESS, địa_chỉ_máy]` mô tả ở đó (mượn từ SASPyTourney/pyserial) sau đó **tự nó bị phát hiện không đúng chuẩn SAS 6.02 thật** (Section 2.2.1/2.2.2.1 chỉ yêu cầu ĐÚNG 1 byte địa chỉ, không có preamble) và đã được thay bằng framing 1-byte chuẩn — xem `sas_general_poll()`/`sas_send_frame()` trong `sas_polling.cpp` hiện tại, và bảng config bên dưới (define `SAS_POLL_ADDRESS` đã bị xoá khỏi code). Giữ nguyên narrative debug gốc bên dưới vì vẫn còn giá trị tham khảo (đường dẫn loại trừ GND/voltage/framing), chỉ đừng copy lại cơ chế 2-byte đó cho máy mới.
+
 ### Tóm tắt kết quả cuối cùng
 
 ✅ General Poll và Credits (LP 0x1A) đọc đúng, ổn định, CRC valid 100%.
@@ -477,19 +481,42 @@ Không nên tin nhãn TX/RX in trên đầu nối — quy ước ghi nhãn theo 
 
 ---
 
+## AFT / Denomination / Ticket Control — bổ sung 2026-09-08
+
+Narrative debug đầy đủ (log thật, số liệu, thứ tự đã thử) nằm ở `NHATKY.md` ngày 2026-09-08. Mục này chỉ ghi lại **sự thật giao thức bền vững**, áp dụng cho mọi máy/mọi lần sau.
+
+**Byte order ("binary" field LSB-first vs BCD/ASCII MSB-first, Section 2.2.3):** đã lưu thành memory riêng cho mọi project tương lai — xem ghi chú trong code (`sas_commands.cpp`) nếu cần tra lại chi tiết; tóm tắt: Asset Number/POS ID (LP 0x72/0x73) và Asset Number của LP 0x74 đều LSB-first, khác với BCD (credits, amounts) luôn MSB-first.
+
+**Accounting Denomination (LP 0x1F, Table C-4):** mọi giá trị "credits" thô của SAS (Credits LP 0x1A, Handpay LP 0x1B, Meters LP 0xAF) đều tính theo đơn vị accounting-denom của máy, **không mặc định là 1 cent**. Firmware query LP 0x1F 1 lần lúc boot (`query_machine_denom()`), quy đổi mọi giá trị sang cents thật qua `credits_to_cents()` trước khi log/gửi MQTT. **Máy thật đã test gửi khung LP 0x1F chỉ 24 byte (không phải 25 byte theo bảng IGT gốc)** — field Denomination vẫn ở offset cố định [7] nên không ảnh hưởng, nhưng đừng hardcode độ dài khung tối thiểu bằng spec table nếu chưa xác nhận trên máy thật; nên chỉ check đủ dài để chạm field cần dùng + để CRC tự xác nhận phần còn lại.
+
+**AFT Withdraw (rút hết credit) — máy thật KHÔNG hỗ trợ "amount=9999999999 + partial transfer allowed"** (status trả về `0x86`, spec Section 8.3 tự thừa nhận "some gaming machines may refuse partial transfers"). Cách đúng dùng cho project này: query **LP 0x74 (AFT Game Lock and Status)** lấy "current cashable amount" (đã có sẵn đơn vị cents, khác LP 0x1A dùng đơn vị denom), rồi gửi **FULL transfer** (transfer code `0x00`) đúng số tiền đó — không bao giờ cần "partial" nữa. LP 0x74 cũng cho biết máy có support partial-to-host hay không (bit1 `host_cashout_status`) và có đang cho phép "transfer from gaming machine" hay không (bit1 `available_transfers`) — log ra để biết trước nếu gặp máy khác.
+
+**AFT transfer status 0x40 (PENDING) không phải lỗi** — máy đang xử lý, chưa xong. Host **bắt buộc** phải gửi tiếp long poll 72 interrogation với transfer code **`0xFF`** (không phải `0xFE`) để "acknowledge" và đóng transfer cycle — nếu không, mọi long poll 72 mới (kể cả không liên quan) sẽ bị từ chối `0xC0` ("not compatible with current transfer in progress") cho tới khi được acknowledge đúng cách. `0xFE` chỉ "peek", không có tác dụng đóng cycle. `execute_aft_command()` giờ tự động: (1) flush mọi cycle còn treo bằng `0xFF` trước khi gửi transfer mới, (2) lặp interrogation `0xFF` tối đa 15 lần/300ms nếu gặp `0x40`.
+
+**Khóa in/cashout ticket khi EVO đang là host chủ động — dùng LP 0x7B (Extended Validation Status, Section 15.2).** Đây là cơ chế chuẩn SAS có sẵn cho việc này (không phải hack). Firmware gọi 1 lần lúc boot (`configure_ticket_lockdown()`), tắt bit0 (in ticket cashable, spec nói đã bao gồm cả restricted), bit3 (in ticket restricted, dự phòng), bit5 (nhận ticket-in/redemption). **Đây là ghi cấu hình bền vững trên máy — KHÔNG tự phục hồi khi board mất điện/ngắt kết nối.** Muốn trả máy về chế độ ticket bình thường: gửi lại LP 0x7B với 3 bit đó = 1, hoặc qua menu operator nếu máy hỗ trợ.
+
+**Máy DISABLED (CMD_DISABLE) không được nhận AFT_WITHDRAW** — chặn ở firmware (`s_state == SLOT_STATE_DISABLED`, có thẩm quyền thật) và backend (check DB status trước khi gửi MQTT, phản hồi nhanh hơn).
+
+**Quy ước tiền/cent trong toàn bộ stack: luôn `Math.round()`, không bao giờ `Math.floor()`/`parseInt()`/truncate** khi chuyển đổi dollar↔cents hoặc khi có phép nhân/chia float — `parseInt("50.75")` cắt cụt thành `50` (mất cent), và `Math.floor()` trên một pool tích lũy theo % (virtual jackpot) luôn trả THIẾU tiền một cách hệ thống. Xem `App.tsx` (buy-in/aft-in), `device.controller.ts`, `virtual-jackpot.service.ts` cho pattern đúng.
+
+---
+
 ## Cấu hình Firmware (config.h)
 
-**Tất cả pin DM9051 là internal traces — KHÔNG chỉnh.** Chỉ thay đổi các define sau trước khi flash cho từng máy:
+**Tất cả pin DM9051 là internal traces — KHÔNG chỉnh.**
+
+**Machine ID không còn là #define phải sửa trước khi build.** Từ khi có `machine_config.cpp`, `SAS_MACHINE_ADDRESS`/IP tĩnh/MQTT client ID/topic đều được **provision qua NVS lúc boot** (`machine_config_init()`, gọi ngay sau `nvs_flash_init()` trong `main.cpp`) — nếu NVS chưa có ID, firmware vào chế độ chờ provisioning (block cho tới khi nhận `SET_ID`), không đọc từ config.h nữa. Xem `machine_config.h` cho danh sách biến runtime (`g_machine_id`, `g_eth_static_ip = 192.168.100.(199+id)`, `g_mqtt_client_id`, `g_topic_*`).
+
+Các define còn thực sự nằm trong `config.h` và có thể cần chỉnh:
 
 | Define | Giá trị mặc định | Ghi chú |
 |---|---|---|
-| `SAS_MACHINE_ADDRESS` | `0x01` | Địa chỉ SAS (1–127), mỗi máy khác nhau |
-| `SAS_POLL_ADDRESS` | `0x82` | **Mới (2026-09-05).** Byte "wakeup" cố định gửi trước địa chỉ máy thật trên mọi giao dịch SAS — xem mục "Nhật ký debug SAS với máy thật (2026-09)". Thử `0x80` nếu `0x82` không nhận được phản hồi trên một máy cụ thể. |
 | `SAS_RESPONSE_TIMEOUT` | `20` ms | Timeout cho General Poll (chạy mỗi chu kỳ 40ms, phải ngắn) |
-| `SAS_LONG_POLL_TIMEOUT` | `100` ms | **Mới (2026-09-05).** Timeout cho Credits/Meters/AFT/Handpay (chạy thưa hơn, có thể chờ lâu hơn). Trước đây là 35ms → luôn bị cắt cụt phản hồi thật (đo được máy cần tới ~95ms cho frame 16 byte trong trường hợp xấu nhất). |
-| `MQTT_BROKER_HOST` | `"192.168.1.100"` | IP server chạy Mosquitto |
-| `MQTT_CLIENT_ID` | `"GMI-Machine-01"` | Phải unique trên toàn broker |
-| `MQTT_TOPIC_*` | `casino/machine/01/...` | Phải khớp với machine ID |
+| `SAS_LONG_POLL_TIMEOUT` | `100` ms | Timeout cho Credits/Meters/AFT/Handpay/Denom/Lock-status (chạy thưa hơn, có thể chờ lâu hơn). Trước đây 35ms → luôn bị cắt cụt phản hồi thật (đo được máy cần tới ~95ms cho frame 16 byte trong trường hợp xấu nhất). |
+| `SAS_AFT_ASSET_NUMBER` | `67UL` | **Chỉ dùng làm fallback** nếu query LP 0x73 (code `0xFF`) lúc boot thất bại/trả về 0 — bình thường firmware tự hỏi máy asset number thật, không cần sửa giá trị này cho máy mới (xem mục AFT bên dưới). |
+| `MQTT_BROKER_HOST` | `"192.168.100.69"` | IP server chạy Mosquitto — **vẫn là compile-time**, giống nhau cho mọi máy (không qua NVS) |
+| `MQTT_BROKER_PORT`/`MQTT_USER`/`MQTT_PASS`/`MQTT_KEEPALIVE` | — | Cấu hình kết nối broker, dùng chung mọi máy |
+| `LED_SERIAL_PIN` / `LED_NETWORK_PIN` | `5` / `2` | Xem mục "LED onboard" — không đổi trừ khi đổi board |
 
 ---
 

@@ -1,4 +1,6 @@
 {
   "backendUrl": "http://localhost:3000",
-  "backgroundImage": "./bg.jpg"
+  "backgroundImage": "./bg.jpg",
+  "_layout_comment": "Uncomment/fill in 'layout' below only when switching to a DIFFERENT background image that needs its row/timer positions recalibrated. Leave omitted to use the built-in defaults tuned for bg.jpg. Shape: { row:{y0,pitch,h}, colName:{x,w}, colWin:{x,w}, timer:{right,top,size} } -- all numbers measured against a 1920x1080 canvas (right/top/size as percent of canvas, x/w/y0/pitch/h as px).",
+  "layout": null
 }

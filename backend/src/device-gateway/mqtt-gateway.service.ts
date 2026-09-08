@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as mqtt from 'mqtt';
+import { randomUUID } from 'crypto';
 
 import { RedisService } from '../redis/redis.module';
 import { MachineEntity, MachineStatus } from '../database/entities/machine.entity';
@@ -197,6 +198,15 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
   // ── Send command to a specific machine ───────────────────
 
   sendCommand(machineId: string, cmd: ServerCommand) {
+    // AFT transfers (SAS 6.02 Section 8.3) require a transaction ID that
+    // differs from the machine's last logged transfer, or the machine
+    // rejects the request as a duplicate (status 0x81). Callers of this
+    // method (buy-in, aft-in-all, aft-out-all) don't supply one, so
+    // generate one here -- the single place every AFT command passes
+    // through -- rather than requiring every call site to remember to.
+    if ((cmd.type === 'AFT_PUMP' || cmd.type === 'AFT_WITHDRAW') && !cmd.txn_id) {
+      cmd = { ...cmd, txn_id: randomUUID().replace(/-/g, '').slice(0, 20) };
+    }
     const topic = `casino/machine/${machineId}/commands`;
     this.client.publish(topic, JSON.stringify(cmd), { qos: 1 });
   }

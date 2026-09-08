@@ -214,10 +214,15 @@ export default function App() {
   }, []);
 
   const handleAftIn = async () => {
-    const amt = parseInt(settings.startCredit) || 0;
-    if (!amt) return;
+    // parseFloat + Math.round (not parseInt) so a fractional dollar amount
+    // (e.g. "50.75") isn't silently truncated to 50 before the *100 --
+    // parseInt("50.75") === 50, dropping the 75 cents entirely. Math.round
+    // also absorbs any JS float artifact from the *100 multiplication
+    // itself (e.g. 19.99*100 === 1998.9999999999998).
+    const amtCents = Math.round((parseFloat(settings.startCredit) || 0) * 100);
+    if (!amtCents) return;
     setBusy(true);
-    try { await aftInAll(amt * 100); } finally { setBusy(false); }
+    try { await aftInAll(amtCents); } finally { setBusy(false); }
   };
 
   const handleAftOut = async () => {
@@ -226,12 +231,13 @@ export default function App() {
   };
 
   const handleBuyIn = async (machineId: string) => {
-    const amt = parseInt(buyInMap[machineId] || '0');
-    if (!amt) return;
-    await sendMachineCommand(machineId, { type: 'AFT_PUMP', amount: amt * 100 });
+    // See handleAftIn() above for why parseFloat+Math.round, not parseInt.
+    const amtCents = Math.round((parseFloat(buyInMap[machineId] || '0') || 0) * 100);
+    if (!amtCents) return;
+    await sendMachineCommand(machineId, { type: 'AFT_PUMP', amount: amtCents });
     // Optimistic credit update so machine row reflects buy-in immediately
     setMachines(prev => prev.map(m =>
-      m.machine_id === machineId ? { ...m, credits: m.credits + amt * 100 } : m,
+      m.machine_id === machineId ? { ...m, credits: m.credits + amtCents } : m,
     ));
     setBuyInMap(prev => ({ ...prev, [machineId]: '' }));
   };

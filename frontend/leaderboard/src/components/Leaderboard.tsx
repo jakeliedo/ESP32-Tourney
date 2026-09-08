@@ -19,28 +19,89 @@ const MEDALS = ['#FFD060', '#C0C8D0', '#D4904A'];
 const backendUrl: string = (window as any).__config__?.backendUrl      ?? '';
 const bgImageUrl: string = (window as any).__config__?.backgroundImage ?? './bg.jpg';
 
-// ─── LAYOUT — pixel grid for 1920 × 1080 fullscreen ─────────────────────────
-// All px values measured directly on the 1920×1080 canvas.
-// To relocate columns, edit COL_* constants only.
+// ─── DESIGN CANVAS ───────────────────────────────────────────────────────────
+// Every position/size below is measured against this FIXED 1920×1080 (16:9)
+// reference canvas, never against the real browser viewport. The canvas is
+// rendered at its native 1920×1080 size and then CSS `transform: scale(...)`
+// is applied once, as a whole, to fit whatever screen it's actually shown on
+// (see useCanvasScale() below). This is what makes every number/row/panel
+// stay pixel-perfectly aligned to the background image on ANY screen size or
+// aspect ratio (1080p, 1440p, 4K, ultrawide...) -- previously these were
+// plain CSS px/vw values applied directly to a 100vw×100vh container, which
+// only lined up with the (fixed) background image on a screen that happened
+// to be exactly 1920×1080; anywhere else the background scaled (via
+// `background-size: cover`) while the overlay numbers did not, so they drifted
+// out of alignment with the image the larger/smaller/differently-shaped the
+// real screen was.
+const CANVAS_W = 1920;
+const CANVAS_H = 1080;
 
-// Row grid: top edge of row i = Math.round(y0 + pitch * i)
-const ROW = { y0: 433.11, pitch: 45.6328, h: 38 } as const;
+// Convert a "percent of canvas width" design value (what used to be written
+// as e.g. `9.2vw` back when the canvas WAS the viewport) into an absolute px
+// value against the fixed canvas -- NOT the real viewport. Keeping the
+// original percent numbers (rather than hand-computing px) keeps the design
+// intent ("this timer circle is 9.2% of the canvas wide") readable and easy
+// to re-tune.
+const pxw = (percentOfCanvasWidth: number) => (percentOfCanvasWidth / 100) * CANVAS_W;
 
-// Exact column positions (px)
-const COL_NAME = { x: 762,  w: 307 } as const;   // PLAYER NAME
-const COL_WIN  = { x: 1095, w: 237 } as const;   // TOTAL WINNINGS
+// ─── LAYOUT — pixel grid measured on the 1920×1080 design canvas ──────────
+// Overridable per-background-image via window.__config__.layout (see
+// electron/config.json) so switching to a different background image only
+// requires editing config, not this source file or a rebuild -- see the
+// merge below. Re-measure these against the NEW image once (same way the
+// defaults here were measured) and drop them into config.json's `layout`
+// key; they then apply correctly on every screen size automatically thanks
+// to the canvas-scale transform above.
+
+const DEFAULT_ROW      = { y0: 433.11, pitch: 45.6328, h: 38 } as const;
+const DEFAULT_COL_NAME = { x: 762,  w: 307 } as const;   // PLAYER NAME
+const DEFAULT_COL_WIN  = { x: 1095, w: 237 } as const;   // TOTAL WINNINGS
+// right/top are % of canvas; size is % of canvas WIDTH (square circle).
+const DEFAULT_TIMER    = { right: 2.8, top: 4.7, size: 9.2 } as const;
+
+const cfgLayout: {
+  row?: Partial<typeof DEFAULT_ROW>;
+  colName?: Partial<typeof DEFAULT_COL_NAME>;
+  colWin?: Partial<typeof DEFAULT_COL_WIN>;
+  timer?: Partial<typeof DEFAULT_TIMER>;
+} = (window as any).__config__?.layout ?? {};
+
+const ROW      = { ...DEFAULT_ROW,      ...(cfgLayout.row      ?? {}) };
+const COL_NAME = { ...DEFAULT_COL_NAME, ...(cfgLayout.colName  ?? {}) };
+const COL_WIN  = { ...DEFAULT_COL_WIN,  ...(cfgLayout.colWin   ?? {}) };
+const TIMER    = { ...DEFAULT_TIMER,    ...(cfgLayout.timer    ?? {}) };
 // No rank-number overlay — background image already has rank graphics for all 10 rows.
 
-// Timer circle (unchanged — top-right of bg.jpg)
-const TIMER = { right: '2.8%', top: '4.7%', size: '9.2vw' } as const;
-
-// Row top in px
+// Row top in px (canvas space)
 const rowTopPx = (i: number) => Math.round(ROW.y0 + ROW.pitch * i);
 
 function fmt(sec: number) {
   const m = Math.floor(Math.max(0, sec) / 60);
   const s = Math.max(0, sec) % 60;
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+// ─── Scale-to-fit hook ───────────────────────────────────────────────────────
+// Uniformly scales the fixed 1920×1080 canvas to fill the real viewport,
+// preserving aspect ratio (matches the previous `background-size: cover`
+// look: fills the screen completely, cropping evenly on whichever axis is
+// too wide/tall, never stretching/distorting). Recomputed on window resize
+// and on fullscreen enter/exit (Electron/browser fullscreen can change the
+// available viewport without necessarily firing a plain 'resize' in every
+// environment).
+function useCanvasScale(): number {
+  const compute = () => Math.max(window.innerWidth / CANVAS_W, window.innerHeight / CANVAS_H);
+  const [scale, setScale] = useState(compute);
+  useEffect(() => {
+    const onResize = () => setScale(compute());
+    window.addEventListener('resize', onResize);
+    document.addEventListener('fullscreenchange', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('fullscreenchange', onResize);
+    };
+  }, []);
+  return scale;
 }
 
 // ─── CSS keyframe injected once ───────────────────────────────────────────────
@@ -104,6 +165,8 @@ export default function Leaderboard() {
   // Virtual jackpot pool — updated by jackpot_pool_update socket event
   const [vjpPool, setVjpPool]         = useState<number | null>(null);
   const [jackpotVideoUrl, setJackpotVideoUrl] = useState<string | null>(null);
+
+  const scale = useCanvasScale();
 
   const endTimeRef           = useRef<number | null>(null);
   const prevScores           = useRef<Record<string, number>>({});
@@ -306,11 +369,6 @@ export default function Leaderboard() {
         width: '100vw', height: '100vh',
         position: 'relative', overflow: 'hidden',
         background: '#1a0606',
-        backgroundImage: `url('${bgImageUrl}')`,
-        backgroundSize: 'cover',
-        backgroundPosition: 'center top',
-        backgroundRepeat: 'no-repeat',
-        fontFamily: "'Georgia', serif",
         cursor: 'none',
       }}
       onDoubleClick={() => {
@@ -321,14 +379,29 @@ export default function Leaderboard() {
         }
       }}
     >
+      {/* ── DESIGN CANVAS — fixed 1920×1080, scaled as a whole to fit the
+           real screen (see useCanvasScale()). Every child below uses px/%
+           measured against THIS box, never the real viewport, so alignment
+           with the background image holds on any screen size/ratio. ── */}
+      <div style={{
+        position: 'absolute',
+        width: CANVAS_W, height: CANVAS_H,
+        left: '50%', top: '50%',
+        transform: `translate(-50%, -50%) scale(${scale})`,
+        transformOrigin: 'center center',
+        backgroundImage: `url('${bgImageUrl}')`,
+        backgroundSize: `${CANVAS_W}px ${CANVAS_H}px`,
+        backgroundRepeat: 'no-repeat',
+        fontFamily: "'Georgia', serif",
+      }}>
 
       {/* ── TIMER CIRCLE — top-right black circle in image ──────────────── */}
       <div style={{
         position: 'absolute',
-        right:  TIMER.right,
-        top:    TIMER.top,
-        width:  TIMER.size,
-        height: TIMER.size,
+        right:  `${TIMER.right}%`,
+        top:    `${TIMER.top}%`,
+        width:  `${pxw(TIMER.size)}px`,
+        height: `${pxw(TIMER.size)}px`,
         borderRadius: '50%',
         background: 'rgba(4,0,0,0.82)',
         display: 'flex', flexDirection: 'column',
@@ -337,27 +410,27 @@ export default function Leaderboard() {
         animation: timerUrgent ? 'timerPulse 0.9s ease-in-out infinite' : 'none',
       }}>
         <span style={{
-          fontSize: '0.62vw',
+          fontSize: `${pxw(0.62)}px`,
           color: timerUrgent ? '#ff6060' : tournamentRunning ? '#c8a84b' : '#888',
           letterSpacing: '0.18em',
           fontFamily: "'Consolas', monospace",
           fontWeight: 700,
-          marginBottom: '0.5vw',
+          marginBottom: `${pxw(0.5)}px`,
           textTransform: 'uppercase',
         }}>
           {tournamentRunning ? 'TIME LEFT' : standbyTime ? 'READY' : 'STANDBY'}
         </span>
         <span style={{
           fontFamily: "'Georgia', serif",
-          fontSize: '2.3vw',
+          fontSize: `${pxw(2.3)}px`,
           fontWeight: 700,
           color: timerUrgent ? '#ff4040' : '#ffffff',
           fontVariantNumeric: 'tabular-nums',
           lineHeight: 1,
           textShadow: timerUrgent
-            ? '0 0 1.5vw rgba(255,60,60,0.7)'
+            ? `0 0 ${pxw(1.5)}px rgba(255,60,60,0.7)`
             : tournamentRunning
-              ? '0 0 1.2vw rgba(255,255,255,0.4)'
+              ? `0 0 ${pxw(1.2)}px rgba(255,255,255,0.4)`
               : 'none',
           letterSpacing: '0.04em',
           transition: 'color 0.5s, text-shadow 0.5s',
@@ -372,10 +445,10 @@ export default function Leaderboard() {
       {tournamentRunning && vjpPool !== null && (
         <div style={{
           position: 'absolute',
-          left:   TIMER.right,   // '2.8%' — symmetric axis with timer on right
-          top:    TIMER.top,     // '4.7%' — same vertical origin
-          width:  TIMER.size,    // '9.2vw' — exact same diameter
-          height: TIMER.size,    // '9.2vw' — circle
+          left:   `${TIMER.right}%`,  // mirrors timer's `right` — symmetric axis
+          top:    `${TIMER.top}%`,
+          width:  `${pxw(TIMER.size)}px`,
+          height: `${pxw(TIMER.size)}px`,
           borderRadius: '50%',
           background: 'rgba(0,5,20,0.84)',
           border: '1px solid rgba(0,180,255,0.42)',
@@ -386,12 +459,12 @@ export default function Leaderboard() {
         }}>
           {/* Label — mirrors "TIME LEFT" label style in timer */}
           <span style={{
-            fontSize: '0.62vw',
+            fontSize: `${pxw(0.62)}px`,
             color: '#00c8ff',
             letterSpacing: '0.18em',
             fontFamily: "'Consolas', monospace",
             fontWeight: 700,
-            marginBottom: '0.5vw',
+            marginBottom: `${pxw(0.5)}px`,
             textTransform: 'uppercase',
             textShadow: '0 0 8px rgba(0,200,255,0.75)',
             animation: 'vjpTitlePulse 2s ease-in-out infinite',
@@ -402,12 +475,12 @@ export default function Leaderboard() {
           {/* Amount — mirrors timer digit style, neon blue glow */}
           <span style={{
             fontFamily: "'Georgia', serif",
-            fontSize: '1.55vw',
+            fontSize: `${pxw(1.55)}px`,
             fontWeight: 700,
             color: '#cce8ff',
             fontVariantNumeric: 'tabular-nums',
             lineHeight: 1,
-            textShadow: '0 0 1.2vw rgba(0,200,255,0.85), 0 0 0.4vw rgba(140,220,255,0.65)',
+            textShadow: `0 0 ${pxw(1.2)}px rgba(0,200,255,0.85), 0 0 ${pxw(0.4)}px rgba(140,220,255,0.65)`,
             letterSpacing: '0.04em',
             transition: 'color 0.4s, text-shadow 0.4s',
             animation: 'vjpAmountShimmer 2.2s ease-in-out infinite',
@@ -423,7 +496,7 @@ export default function Leaderboard() {
         <div style={{
           position: 'absolute',
           bottom: '3%', left: '3%',
-          fontSize: '0.7vw',
+          fontSize: `${pxw(0.7)}px`,
           color: 'rgba(200,168,75,0.55)',
           letterSpacing: '0.22em',
           fontFamily: "'Consolas', monospace",
@@ -441,16 +514,16 @@ export default function Leaderboard() {
       <div style={{
         position: 'absolute',
         bottom: '3%', right: '3%',
-        display: 'flex', alignItems: 'center', gap: '0.5vw',
-        fontSize: '0.65vw', fontWeight: 700, letterSpacing: '0.2em',
+        display: 'flex', alignItems: 'center', gap: `${pxw(0.5)}px`,
+        fontSize: `${pxw(0.65)}px`, fontWeight: 700, letterSpacing: '0.2em',
         color: tournamentRunning ? 'rgba(58,170,96,0.8)' : 'rgba(128,128,128,0.5)',
         fontFamily: "'Consolas', monospace",
         zIndex: 10,
       }}>
         <span style={{
-          width: '0.6vw', height: '0.6vw', borderRadius: '50%', display: 'inline-block',
+          width: `${pxw(0.6)}px`, height: `${pxw(0.6)}px`, borderRadius: '50%', display: 'inline-block',
           background: tournamentRunning ? '#3aaa60' : connected.length > 0 ? '#c8a84b' : '#444',
-          boxShadow: tournamentRunning ? '0 0 0.5vw #3aaa60' : 'none',
+          boxShadow: tournamentRunning ? `0 0 ${pxw(0.5)}px #3aaa60` : 'none',
         }} />
         {tournamentRunning ? 'LIVE' : connected.length > 0 ? 'STANDBY' : 'IDLE'}
       </div>
@@ -459,7 +532,8 @@ export default function Leaderboard() {
            Rows are positioned using the exact pixel formula:
              top = Math.round(ROW.y0 + ROW.pitch * i)
            Columns are absolute within each row container.
-           Edit COL_NAME / COL_WIN / ROW at the top of this file. ── */}
+           Edit COL_NAME / COL_WIN / ROW at the top of this file (or override
+           via window.__config__.layout for a different background image). ── */}
       {displayRows.map((entry, i) => {
         const rank       = i + 1;
         const medalColor = rank <= 3 ? MEDALS[rank - 1] : null;
@@ -549,11 +623,13 @@ export default function Leaderboard() {
           <div style={{
             border: '1px solid rgba(200,168,75,0.4)',
             borderRadius: 12,
-            padding: jackpotVideoUrl ? '2vw 3vw 3vw' : '4vw 6vw',
+            padding: jackpotVideoUrl
+              ? `${pxw(2)}px ${pxw(3)}px ${pxw(3)}px`
+              : `${pxw(4)}px ${pxw(6)}px`,
             textAlign: 'center',
             background: 'radial-gradient(ellipse at center, #1a0f00 0%, #08060a 70%)',
             animation: 'jpGlow 1.6s ease-in-out infinite',
-            width: jackpotVideoUrl ? '42vw' : undefined,
+            width: jackpotVideoUrl ? `${pxw(42)}px` : undefined,
           }}>
             {jackpotVideoUrl && (
               <video
@@ -565,35 +641,35 @@ export default function Leaderboard() {
                 style={{
                   width: '100%',
                   borderRadius: 8,
-                  marginBottom: '1.5vw',
+                  marginBottom: `${pxw(1.5)}px`,
                   display: 'block',
                   background: '#000',
                 }}
               />
             )}
             <div style={{
-              fontSize: '0.9vw', fontWeight: 700, letterSpacing: '0.28em',
-              color: '#c8a84b', marginBottom: '1.5vw',
+              fontSize: `${pxw(0.9)}px`, fontWeight: 700, letterSpacing: '0.28em',
+              color: '#c8a84b', marginBottom: `${pxw(1.5)}px`,
               fontFamily: "'Consolas', monospace",
             }}>
               MYSTERY JACKPOT HIT
             </div>
             <div style={{
-              fontFamily: 'Georgia, serif', fontSize: '3.5vw',
-              color: '#fffbe8', marginBottom: '1vw', letterSpacing: '0.08em',
-              textShadow: '0 0 2vw rgba(200,168,75,0.4)',
+              fontFamily: 'Georgia, serif', fontSize: `${pxw(3.5)}px`,
+              color: '#fffbe8', marginBottom: `${pxw(1)}px`, letterSpacing: '0.08em',
+              textShadow: `0 0 ${pxw(2)}px rgba(200,168,75,0.4)`,
             }}>
               {name(jackpot.machineId)}
             </div>
             <div style={{
-              fontFamily: 'Georgia, serif', fontSize: '5.5vw', fontWeight: 700,
+              fontFamily: 'Georgia, serif', fontSize: `${pxw(5.5)}px`, fontWeight: 700,
               color: '#FFD060', fontVariantNumeric: 'tabular-nums',
-              textShadow: '0 0 3vw rgba(255,208,96,0.5)', marginBottom: '1.5vw',
+              textShadow: `0 0 ${pxw(3)}px rgba(255,208,96,0.5)`, marginBottom: `${pxw(1.5)}px`,
             }}>
               ${(jackpot.amount / 100).toLocaleString('en', { minimumFractionDigits: 2 })}
             </div>
             <div style={{
-              fontSize: '0.75vw', letterSpacing: '0.35em',
+              fontSize: `${pxw(0.75)}px`, letterSpacing: '0.35em',
               color: 'rgba(200,168,75,0.45)',
               fontFamily: "'Consolas', monospace",
             }}>
@@ -602,6 +678,7 @@ export default function Leaderboard() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

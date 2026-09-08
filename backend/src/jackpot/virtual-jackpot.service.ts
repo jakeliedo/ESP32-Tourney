@@ -77,8 +77,14 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getPool(): Promise<number> {
+    // Math.round, not Math.floor: the pool accrues fractional cents every
+    // tick (totalDelta * rate, e.g. 1% of coin-in), so it's virtually
+    // never a whole number internally. Flooring it for display/payout
+    // always throws away that fractional remainder in the same direction
+    // (down), which is a real, systematic underpayment over a tournament's
+    // lifetime, not just display noise -- round to the nearest cent instead.
     const v = await this.redis.get('vjp:pool');
-    return v ? Math.floor(parseFloat(v)) : this.floor;
+    return v ? Math.round(parseFloat(v)) : this.floor;
   }
 
   // ── Internal helpers ─────────────────────────────────────────
@@ -129,7 +135,12 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
         // Jackpot fires — award to the current tournament leader
         const rankings = await this.redis.getLeaderboard(active.id);
         const winner   = rankings[0]?.machineId ?? 'VIRTUAL';
-        const amount   = Math.floor(pool);
+        // Round, not floor -- see getPool() above. The actual payout sent
+        // to the machine must be a whole number of cents (AFT can't carry
+        // sub-cent amounts), but rounding to the nearest cent instead of
+        // always truncating down keeps the payout honest to the real
+        // accrued pool value instead of systematically shorting it.
+        const amount   = Math.round(pool);
         console.log(`🎰 Virtual Jackpot HIT — ${winner}: $${(amount / 100).toFixed(2)}`);
         // Persist hit record
         await this.jackpotHits.save({
@@ -150,7 +161,7 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Always broadcast current pool while tournament is running
-    this.leaderboard.broadcastJackpotPool(Math.floor(pool));
+    this.leaderboard.broadcastJackpotPool(Math.round(pool));
   }
 
   private newHitValue(): number {

@@ -118,7 +118,8 @@ SasMetersResponse sas_parse_meters(const uint8_t* buf, size_t len) {
 // map and why the old 6-field version failed on real hardware).
 size_t sas_build_lp_aft(uint8_t* buf, uint8_t address,
                          uint8_t transfer_code, uint8_t transfer_type,
-                         uint32_t amount_credits, const char* txn_id,
+                         uint8_t amount_category, uint32_t amount_credits,
+                         const char* txn_id,
                          uint32_t asset_number, const uint8_t* registration_key) {
     size_t idx = 0;
 
@@ -129,29 +130,32 @@ size_t sas_build_lp_aft(uint8_t* buf, uint8_t address,
 
     buf[idx++] = transfer_code;        // Transfer Code
     buf[idx++] = 0x00;                 // Transaction Index -- always 0 for a new transfer
-    buf[idx++] = transfer_type;        // Transfer Type
+    buf[idx++] = transfer_type;        // Transfer Type (AFT_XFER_*, Table 8.3d)
 
     // Cashable / Restricted / Non-restricted amounts -- 5-byte BCD each.
-    // amount_credits goes into whichever bucket transfer_type selects;
-    // the other two stay zero (a transfer is always exactly one type).
-    uint32_t cashable_amt      = (transfer_type == AFT_TYPE_CASHABLE)      ? amount_credits : 0;
-    uint32_t restricted_amt    = (transfer_type == AFT_TYPE_RESTRICTED)    ? amount_credits : 0;
-    uint32_t nonrestricted_amt = (transfer_type == AFT_TYPE_NONRESTRICTED) ? amount_credits : 0;
+    // amount_credits goes into whichever bucket amount_category selects;
+    // the other two stay zero (a transfer is always exactly one category).
+    uint32_t cashable_amt      = (amount_category == AFT_AMOUNT_CASHABLE)      ? amount_credits : 0;
+    uint32_t restricted_amt    = (amount_category == AFT_AMOUNT_RESTRICTED)    ? amount_credits : 0;
+    uint32_t nonrestricted_amt = (amount_category == AFT_AMOUNT_NONRESTRICTED) ? amount_credits : 0;
     uint32_to_bcd(cashable_amt,      &buf[idx], 5); idx += 5;
     uint32_to_bcd(restricted_amt,    &buf[idx], 5); idx += 5;
     uint32_to_bcd(nonrestricted_amt, &buf[idx], 5); idx += 5;
 
     buf[idx++] = 0x00;                 // Transfer Flags -- no lock/receipt requested
 
-    // Asset Number (4 bytes, big-endian/MSB-first) -- must be the value
-    // obtained from a successful LP 0x73 registration, not a guess: a
-    // confirmed-correct asset number still got rejected with status 0x93
-    // when the Registration Key below was all-zero (confirmed 2026-09-05
-    // -- see sas_build_lp_aft_register()).
-    buf[idx++] = (uint8_t)(asset_number >> 24);
-    buf[idx++] = (uint8_t)(asset_number >> 16);
-    buf[idx++] = (uint8_t)(asset_number >> 8);
+    // Asset Number (4 bytes). Per SAS 6.02 Section 2.2.3: "All data
+    // exchanged in the binary format are sent least significant byte
+    // (LSB) first" -- this field is "4 binary", so LSB first, NOT
+    // MSB-first as a prior version of this firmware sent it. Must be the
+    // value obtained from a successful LP 0x73 query/registration, not a
+    // guess: a confirmed-correct asset number still got rejected with
+    // status 0x93 when the Registration Key below was all-zero
+    // (confirmed 2026-09-05 -- see sas_build_lp_aft_register()).
     buf[idx++] = (uint8_t)(asset_number);
+    buf[idx++] = (uint8_t)(asset_number >> 8);
+    buf[idx++] = (uint8_t)(asset_number >> 16);
+    buf[idx++] = (uint8_t)(asset_number >> 24);
 
     // Registration Key (20 bytes) -- from the same LP 0x73 registration.
     memcpy(&buf[idx], registration_key, 20);
@@ -237,18 +241,19 @@ size_t sas_build_lp_aft_register(uint8_t* buf, uint8_t address, uint8_t reg_code
     buf[idx++] = reg_code;
 
     if (reg_code != AFT_REG_CODE_QUERY) {
-        buf[idx++] = (uint8_t)(asset_number >> 24);
-        buf[idx++] = (uint8_t)(asset_number >> 16);
-        buf[idx++] = (uint8_t)(asset_number >> 8);
+        // LSB-first: both fields are "binary" per Section 2.2.3, not BCD/ASCII.
         buf[idx++] = (uint8_t)(asset_number);
+        buf[idx++] = (uint8_t)(asset_number >> 8);
+        buf[idx++] = (uint8_t)(asset_number >> 16);
+        buf[idx++] = (uint8_t)(asset_number >> 24);
 
         memcpy(&buf[idx], registration_key, 20);
         idx += 20;
 
-        buf[idx++] = (uint8_t)(pos_id >> 24);
-        buf[idx++] = (uint8_t)(pos_id >> 16);
-        buf[idx++] = (uint8_t)(pos_id >> 8);
         buf[idx++] = (uint8_t)(pos_id);
+        buf[idx++] = (uint8_t)(pos_id >> 8);
+        buf[idx++] = (uint8_t)(pos_id >> 16);
+        buf[idx++] = (uint8_t)(pos_id >> 24);
     }
 
     buf[len_pos] = (uint8_t)(idx - 3);
@@ -267,11 +272,192 @@ SasAftRegisterResponse sas_parse_aft_register(const uint8_t* buf, size_t len) {
     resp.status_code = buf[3];
 
     if (len >= 30) {
-        resp.asset_number = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16)
-                           | ((uint32_t)buf[6] << 8)  | (uint32_t)buf[7];
+        // LSB-first per Section 2.2.3 ("binary" field, not BCD/ASCII).
+        resp.asset_number = (uint32_t)buf[4] | ((uint32_t)buf[5] << 8)
+                           | ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
         memcpy(resp.registration_key, &buf[8], 20);
     }
 
+    resp.valid = true;
+    return resp;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Long Poll 1F – Send Gaming Machine ID and Information
+//
+// Field layout per SAS 6.02 Table 7.10 (confirmed 2026-09-08 against the
+// official spec PDF, pdftotext-extracted for exact field order since the
+// table's own two-column layout otherwise misleads on which bytes hold
+// what -- the "Description" column is offset by one row from "Field" in
+// the source PDF's rendering, easy to misread as a table for a different
+// long poll entirely):
+//   [addr][0x1F][Game ID:2 ASCII][Additional ID:3 ASCII]
+//   [Denomination:1 binary][Max bet:1 binary][Progressive Group:2 binary]
+//   [Game options:6 ASCII][Paytable ID:4 ASCII][Base%:2 binary]
+//   [CRC_L][CRC_H]
+// Spec total = 25 bytes, BUT the real EGT machine tested 2026-09-08 sends
+// only 24 -- one byte short somewhere after Denomination (brute-force CRC
+// check across candidate lengths confirmed the frame is complete and
+// valid at exactly 24 bytes, not corrupt/truncated; likely a 1-byte
+// Base% field on this implementation instead of the spec's 2). This
+// doesn't affect Denomination, which sits at a fixed offset (7) reached
+// identically in both layouts. Only check length/CRC against the ACTUAL
+// received len (not a hardcoded 25) so both this machine and a
+// full-spec-conformant one parse correctly.
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_machine_info(uint8_t* buf, uint8_t address) {
+    buf[0] = address;
+    buf[1] = SAS_CMD_SEND_MACHINE_INFO;
+    crc16_append(buf, 2);
+    return 4;
+}
+
+SasMachineInfoResponse sas_parse_machine_info(const uint8_t* buf, size_t len) {
+    SasMachineInfoResponse resp = {0, 0, false};
+    if (len < 8) return resp;  // enough to safely reach buf[7] (Denomination)
+    if (!crc16_verify(buf, len)) return resp;
+    if (buf[1] != SAS_CMD_SEND_MACHINE_INFO) return resp;
+
+    resp.denom_code         = buf[7];
+    resp.denom_value_x10000 = sas_denom_code_to_value_x10000(resp.denom_code);
+    resp.valid = true;
+    return resp;
+}
+
+// Table C-4, Appendix C (verified 2026-09-08 directly against the official
+// SAS 6.02 spec PDF). Values are dollars * 10000 so the fractional-cent
+// codes (0x1B-0x1F) stay exact integers instead of needing floating point.
+// Index = denom_code (0x00-0x1F defined; 0x20-0xFF reserved -> 0/unknown).
+static const uint32_t s_denom_table_x10000[32] = {
+    /* 0x00 none    */ 0,
+    /* 0x01 $0.01   */ 100,
+    /* 0x02 $0.05   */ 500,
+    /* 0x03 $0.10   */ 1000,
+    /* 0x04 $0.25   */ 2500,
+    /* 0x05 $0.50   */ 5000,
+    /* 0x06 $1.00   */ 10000,
+    /* 0x07 $5.00   */ 50000,
+    /* 0x08 $10.00  */ 100000,
+    /* 0x09 $20.00  */ 200000,
+    /* 0x0A $100.00 */ 1000000,
+    /* 0x0B $0.20   */ 2000,
+    /* 0x0C $2.00   */ 20000,
+    /* 0x0D $2.50   */ 25000,
+    /* 0x0E $25.00  */ 250000,
+    /* 0x0F $50.00  */ 500000,
+    /* 0x10 $200.00 */ 2000000,
+    /* 0x11 $250.00 */ 2500000,
+    /* 0x12 $500.00 */ 5000000,
+    /* 0x13 $1000   */ 10000000,
+    /* 0x14 $2000   */ 20000000,
+    /* 0x15 $2500   */ 25000000,
+    /* 0x16 $5000   */ 50000000,
+    /* 0x17 $0.02   */ 200,
+    /* 0x18 $0.03   */ 300,
+    /* 0x19 $0.15   */ 1500,
+    /* 0x1A $0.40   */ 4000,
+    /* 0x1B $0.005  */ 50,
+    /* 0x1C $0.0025 */ 25,
+    /* 0x1D $0.002  */ 20,
+    /* 0x1E $0.001  */ 10,
+    /* 0x1F $0.0005 */ 5,
+};
+
+uint32_t sas_denom_code_to_value_x10000(uint8_t denom_code) {
+    if (denom_code >= 32) return 0;
+    return s_denom_table_x10000[denom_code];
+}
+
+// ─────────────────────────────────────────────────────────────
+// Long Poll 74 – AFT Game Lock and Status Request
+//
+// Field layout per SAS 6.02 Table 8.2a (request) / Table 8.2b (response),
+// confirmed 2026-09-08 against the official spec PDF. Response:
+//   [addr][0x74][len]
+//   [asset_number:4][game_lock_status:1][available_transfers:1]
+//   [host_cashout_status:1][aft_status:1][max_buffer_index:1]
+//   [current_cashable_amount:5 BCD][current_restricted_amount:5 BCD]
+//   [current_nonrestricted_amount:5 BCD][transfer_limit:5 BCD]
+//   [restricted_expiration:4 BCD][restricted_pool_id:2][CRC_L][CRC_H]
+// Total response = 40 bytes. Added specifically to read
+// current_cashable_amount, which Table 8.2b states is "in cents" already
+// (unlike the LP 0x1A credit meter, which is in accounting-denom units)
+// -- see AFT_WITHDRAW fix in sas_polling.cpp for why this matters.
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_aft_lock_status(uint8_t* buf, uint8_t address, uint8_t lock_code,
+                                     uint8_t transfer_condition, uint16_t lock_timeout) {
+    buf[0] = address;
+    buf[1] = SAS_CMD_AFT_LOCK_STATUS;
+    buf[2] = lock_code;
+    buf[3] = transfer_condition;
+    uint32_to_bcd(lock_timeout, &buf[4], 2);
+    crc16_append(buf, 6);
+    return 8;
+}
+
+SasAftLockStatusResponse sas_parse_aft_lock_status(const uint8_t* buf, size_t len) {
+    SasAftLockStatusResponse resp = {0, 0xFF, 0, 0, 0, 0, 0, 0, false};
+    if (len < 40) return resp;
+    if (!crc16_verify(buf, len)) return resp;
+    if (buf[1] != SAS_CMD_AFT_LOCK_STATUS) return resp;
+
+    // Asset number here is plain "4 binary" per Table 8.2b, same LSB-first
+    // rule as the LP 0x72/0x73 asset number fields (Section 2.2.3).
+    resp.asset_number = (uint32_t)buf[3] | ((uint32_t)buf[4] << 8)
+                       | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 24);
+    resp.game_lock_status    = buf[7];
+    resp.available_transfers = buf[8];
+    resp.host_cashout_status = buf[9];
+    resp.aft_status          = buf[10];
+    resp.current_cashable_amount      = bcd_to_uint32(&buf[12], 5);
+    resp.current_restricted_amount    = bcd_to_uint32(&buf[17], 5);
+    resp.current_nonrestricted_amount = bcd_to_uint32(&buf[22], 5);
+    resp.valid = true;
+    return resp;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Long Poll 7B – Extended Validation Status
+//
+// Field layout per SAS 6.02 Table 15.2a (request) / Table 15.2b (response),
+// confirmed 2026-09-08 against the official spec PDF (Section 15.2).
+// control_mask/status_bits are "2 binary" fields -- the spec's own bit
+// table for them is literally captioned "Byte LSB / MSB", so they follow
+// the same LSB-first convention as every other multi-byte "binary" field
+// in SAS (Section 2.2.3), transmitted low byte first.
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_validation_status(uint8_t* buf, uint8_t address,
+                                       uint16_t control_mask, uint16_t status_bits,
+                                       uint16_t cashable_exp_days, uint16_t restricted_exp_days) {
+    buf[0] = address;
+    buf[1] = SAS_CMD_EXT_VALIDATION_STATUS;
+    buf[2] = 0x08;  // length: 8 bytes follow, not including CRC
+
+    buf[3] = (uint8_t)(control_mask);        // LSB
+    buf[4] = (uint8_t)(control_mask >> 8);   // MSB
+    buf[5] = (uint8_t)(status_bits);         // LSB
+    buf[6] = (uint8_t)(status_bits >> 8);    // MSB
+
+    uint32_to_bcd(cashable_exp_days,   &buf[7], 2);
+    uint32_to_bcd(restricted_exp_days, &buf[9], 2);
+
+    crc16_append(buf, 11);
+    return 13;
+}
+
+SasValidationStatusResponse sas_parse_validation_status(const uint8_t* buf, size_t len) {
+    SasValidationStatusResponse resp = {0, 0, false};
+    if (len < 15) return resp;
+    if (!crc16_verify(buf, len)) return resp;
+    if (buf[1] != SAS_CMD_EXT_VALIDATION_STATUS) return resp;
+
+    // Asset number: "4 binary", LSB-first (Section 2.2.3).
+    resp.asset_number = (uint32_t)buf[3] | ((uint32_t)buf[4] << 8)
+                       | ((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 24);
+    resp.status_bits  = (uint16_t)buf[7] | ((uint16_t)buf[8] << 8);
     resp.valid = true;
     return resp;
 }
@@ -296,22 +482,24 @@ size_t sas_build_lp_version_serial(uint8_t* buf, uint8_t address) {
 
 SasVersionSerialResponse sas_parse_version_serial(const uint8_t* buf, size_t len) {
     SasVersionSerialResponse resp = {{0}, {0}, false};
-    // Minimum frame: addr, cmd, length, 3-byte version, 1-byte serial
-    // length, 2-byte CRC.
-    if (len < 7) return resp;
+    // Per SAS 6.02 Table 7.15: addr, cmd, length (= 3 + serial chars,
+    // NOT a separate serial-length byte), 3-byte version, N-byte serial
+    // (N = length-3), 2-byte CRC. Minimum frame (N=0): 8 bytes.
+    if (len < 8) return resp;
     if (!crc16_verify(buf, len)) return resp;
     if (buf[1] != SAS_CMD_SEND_VERSION_SERIAL) return resp;
 
     memcpy(resp.sas_version, &buf[3], 3);
     resp.sas_version[3] = '\0';
 
-    size_t serial_len = buf[6];
+    uint8_t total_len = buf[2];  // 3 (version) + N (serial)
+    size_t serial_len = (total_len > 3) ? (size_t)(total_len - 3) : 0;
     if (serial_len > 40) serial_len = 40;
     size_t serial_end = len - 2;  // strip CRC
-    if (7 + serial_len > serial_end) {
-        serial_len = (serial_end > 7) ? (serial_end - 7) : 0;
+    if (6 + serial_len > serial_end) {
+        serial_len = (serial_end > 6) ? (serial_end - 6) : 0;
     }
-    memcpy(resp.serial_number, &buf[7], serial_len);
+    memcpy(resp.serial_number, &buf[6], serial_len);
     resp.serial_number[serial_len] = '\0';
 
     resp.valid = true;
