@@ -225,6 +225,26 @@
   hẹn giờ tắt) — nối vào `sas_send_byte()` + 2 điểm đọc byte thành công trong
   `sas_polling.cpp` (mọi byte TX/RX thật trên UART SAS, không phụ thuộc cờ
   `SAS_LOG_RAW_FRAMES`), và vào `serialize_and_publish()`/`on_message()` trong
-  `mqtt_client.cpp` (mọi publish/nhận MQTT thật). Build OK, chưa flash.
+  `mqtt_client.cpp` (mọi publish/nhận MQTT thật). Đã build + flash lên máy thật.
+
+- **Cập nhật `CLAUDE.md`** với toàn bộ phát hiện giao thức bền vững trong ngày (mục mới
+  "AFT / Denomination / Ticket Control"), sửa các chỗ đã lỗi thời (framing 2-byte cũ,
+  bảng config `SAS_POLL_ADDRESS` đã xoá khỏi code, cơ chế provisioning ID qua NVS).
+  Commit `3efe113` + push lên `origin/EVO1` thành công.
+
+- Giải thích cho người dùng cơ chế `SET_ID` (provisioning machine ID qua Serial,
+  `machine_config.cpp`) và xác nhận: clone firmware bình thường (`pio run --target
+  upload`) không đụng tới NVS nên không tự xung đột ID giữa các board — chỉ rủi ro nếu
+  gõ tay trùng `SET_ID` hoặc clone nguyên flash image (kể cả NVS) từ board đã provision.
+  Xác nhận machine ID chính là ID dùng để phân biệt máy trong control-panel (topic MQTT
+  → `machine_id` primary key trong DB), khác với `display_name` (chỉ là nhãn hiển thị).
+
+---
+
+## 2026-09-09 (Thứ 4)
+
+- Khởi động lại backend (:3000) + control-panel (:5173) — cả 2 đã chạy sẵn từ phiên
+  trước (dev server thật, không phải service cũ tồn đọng). Khởi động thêm leaderboard
+  (:5174), trước đó chưa chạy. Cả 3 xác nhận phản hồi OK.
 
 ---
