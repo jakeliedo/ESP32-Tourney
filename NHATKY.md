@@ -227,4 +227,45 @@
   `SAS_LOG_RAW_FRAMES`), và vào `serialize_and_publish()`/`on_message()` trong
   `mqtt_client.cpp` (mọi publish/nhận MQTT thật). Build OK, chưa flash.
 
+- **Dọn dẹp nhánh git**: Merge `EVO1` → `main` (fast-forward clean, không conflict —
+  `EVO1` được branch từ đúng tip của `main`, xác nhận qua `git merge-base`). Xóa nhánh
+  remote `EVO` (nhánh cũ, đã được thay hoàn toàn bởi `EVO1`). Sau khi merge, `main` và
+  `EVO1` cùng trỏ về commit `749530d`.
+
+- **Thiết kế lại jackpot: toggle REAL / VIRTUAL trên control-panel** (commits `72c792b`
+  và `749530d`).
+
+  **Cơ chế 2 loại:**
+  - **Virtual JP**: đóng góp hằng số `tickIncrement` credits mỗi 2 giây (không phụ thuộc
+    coin-in, không cần máy nào đang chơi), bắt đầu chạy ngay khi tournament ACTIVE, nổ
+    khi pool >= hit_value ngẫu nhiên trong khoảng `[ceiling × 0.8, ceiling)` (top 20%).
+  - **Real JP**: đóng góp theo % coin-in (`coinIn × contributionRate`), chỉ khi có máy
+    đang chơi, nổ khi pool >= hit_value ngẫu nhiên trong `[floor, ceiling)`.
+  - **Cả hai**: chỉ active khi tournament đang ACTIVE (bảo vệ bằng
+    `tournaments.findOne({status: ACTIVE})`), tắt hoàn toàn khi không có tournament.
+  - **Cả hai**: khi nổ đều gọi `broadcastJackpotHit(machineId, amount, videoUrl)` với URL
+    video lấy từ Redis key `vjp:video_url` — 1 lần upload video dùng chung cho cả 2 loại.
+  - **Điều phối**: Redis key `jackpot:mode` = `'real'` | `'virtual'`. `JackpotService`
+    skip khi mode=virtual; `VirtualJackpotService` skip khi mode=real — hoàn toàn độc lập.
+
+  **File đã sửa:**
+  - `backend/src/jackpot/jackpot.service.ts` — Real JP: thêm `configure()`, `getConfig()`,
+    `onModuleInit()` load từ Redis; `processCoinIn()` check mode+tournament; `triggerJackpot()`
+    load video từ Redis.
+  - `backend/src/jackpot/virtual-jackpot.service.ts` — Virtual JP: bỏ `lastCoinIn` map,
+    thêm `tickIncrement` hằng số; `tick()` check mode+tournament; `newHitValue()` sinh
+    trong top 20% dưới trần.
+  - `backend/src/jackpot/jackpot.controller.ts` — thêm `GET/POST /api/jackpot/mode`,
+    `GET/POST /api/jackpot/config` (real), cập nhật `POST /api/jackpot/virtual/config`
+    dùng `tickIncrement` thay vì `rate`.
+  - `frontend/control-panel/src/services/api.ts` — thêm `JackpotMode`, `getJackpotMode`,
+    `setJackpotMode`, `RealJackpotConfig`, `setRealJackpotConfig`; đổi `VirtualJackpotConfig`
+    dùng `tickIncrement`.
+  - `frontend/control-panel/src/App.tsx` — UI: tab `[REAL][VIRTUAL]` toggle (gold/blue);
+    shared floor/ceiling; REAL thêm Rate %; VIRTUAL thêm Credits/tick + Hit Video; gọi
+    `setJackpotMode` + config tương ứng trước khi start tournament.
+
+  - TypeScript backend `npx tsc --noEmit` pass. Vite frontend build pass. Cả 3 server
+    đang chạy: backend `:3000`, control-panel `:5173`, leaderboard `:5174`.
+
 ---

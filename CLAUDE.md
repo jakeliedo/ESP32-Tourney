@@ -324,8 +324,6 @@ Bước 4: Chạy lệnh upload NGAY:
 **Dấu hiệu vào boot mode thành công:** esptool in `Connecting....` rồi `Connected to ESP32-C3`.
 **Dấu hiệu thất bại:** `No serial data received` → lặp lại từ bước 1, kiểm tra dây jumper tiếp xúc tốt.
 
-> **Phát hiện (2026-09-04): pulse EN (bước 2) không đáng tin cậy trên board này.** Đã xác minh trực tiếp bằng cách nghe COM7 trong lúc pulse EN — uptime counter của firmware **không hề reset**, chứng tỏ pulse EN qua J3-1 nhiều lần không thực sự kéo được EN xuống GND (khả năng do tiếp xúc jumper kém, không phải sai chân). **Quy trình thay thế đã xác nhận hoạt động ổn định:** thay vì pulse EN ở bước 2, **rút và cắm lại nguồn cấp cho board (power-cycle toàn bộ)** trong khi vẫn giữ GPIO9→GND, giữ thêm ~1-2s sau khi có nguồn lại rồi mới thả GPIO9. Ưu tiên dùng cách này thay vì pulse EN nếu upload liên tục báo `No serial data received`. Cũng lưu ý: sau khi flash xong, esptool in `Hard resetting via RTS pin` nhưng dòng này **không có tác dụng thật** trên board (không có auto-reset circuit) — cần power-cycle thêm 1 lần nữa (KHÔNG giữ GPIO9 lần này) để board boot vào firmware vừa nạp.
-
 ---
 
 ### Nối dây FTDI Adapter (flashing + serial monitor)
