@@ -174,6 +174,28 @@ export default function Leaderboard() {
   const lastRestTournIdRef   = useRef<number | null>(null);
   const jackpotTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
   const jackpotVideoRef      = useRef<HTMLVideoElement>(null);
+  // Chromium/Electron block autoplay of unmuted media until the page has
+  // seen a real user gesture (click/keypress) -- a kiosk display that just
+  // sits there can go its whole shift without one, so the very first
+  // celebration video plays back silently on `play()` rejection (caught,
+  // no visible error) unless we fall back to muted and re-arm sound the
+  // moment any gesture finally happens.
+  const audioUnlockedRef    = useRef(false);
+
+  useEffect(() => {
+    const unlock = () => {
+      audioUnlockedRef.current = true;
+      if (jackpotVideoRef.current && jackpotVideoRef.current.muted) {
+        jackpotVideoRef.current.muted = false;
+      }
+    };
+    window.addEventListener('pointerdown', unlock, { once: true });
+    window.addEventListener('keydown', unlock, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
 
   // ── Fetch jackpot video URL on mount ─────────────────────────────────────
   useEffect(() => {
@@ -315,11 +337,19 @@ export default function Leaderboard() {
     setJackpot(null);
   }, []);
 
-  // Auto-play video when jackpot fires
+  // Auto-play video when jackpot fires. Try with sound first; if the
+  // browser rejects it (no user gesture yet this page load -- see
+  // audioUnlockedRef above), fall back to muted so the celebration visual
+  // still plays instead of silently doing nothing.
   useEffect(() => {
     if (jackpot && jackpotVideoRef.current) {
-      jackpotVideoRef.current.currentTime = 0;
-      jackpotVideoRef.current.play().catch(() => {});
+      const v = jackpotVideoRef.current;
+      v.currentTime = 0;
+      v.muted = false;
+      v.play().catch(() => {
+        v.muted = true;
+        v.play().catch(() => {});
+      });
     }
   }, [jackpot]);
 

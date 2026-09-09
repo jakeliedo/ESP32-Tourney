@@ -62,7 +62,8 @@ export default function App() {
   const [jpFloor,   setJpFloor]   = useState('100');    // $ display value
   const [jpCeiling, setJpCeiling] = useState('300');    // $ display value
   const [jpRate,    setJpRate]    = useState('0.5');    // % (real JP only)
-  const [vjpTick,   setVjpTick]   = useState('5');      // credits/tick (virtual JP only)
+  const [vjpTick,   setVjpTick]   = useState('5');      // max credits/tick (virtual JP only)
+  const [jpNumHits, setJpNumHits] = useState('1');      // guaranteed jackpot hits per round (both modes)
   const [vjpVideoName, setVjpVideoName]      = useState<string | null>(null);
   const [vjpVideoUploading, setVjpVideoUploading] = useState(false);
   const [jackpotHits, setJackpotHits]        = useState<JackpotHit[]>([]);
@@ -249,22 +250,26 @@ export default function App() {
     // Push jackpot config + mode before starting
     const floorCents   = Math.round((parseFloat(jpFloor)   || 100) * 100);
     const ceilingCents = Math.round((parseFloat(jpCeiling) || 300) * 100);
+    const numHits      = Math.max(1, parseInt(jpNumHits) || 1);
     setJackpotMode(jpMode).catch(() => {});
     if (jpMode === 'virtual') {
       setVirtualJackpotConfig({
         floor: floorCents, ceiling: ceilingCents,
         tickIncrement: parseInt(vjpTick) || 5,
+        numHits,
         enabled: true,
       }).catch(() => {});
     } else {
       setRealJackpotConfig({
         floor: floorCents, ceiling: ceilingCents,
         rate: parseFloat(jpRate) || 0.5,
+        numHits,
       }).catch(() => {});
       // Disable virtual JP when mode is real
       setVirtualJackpotConfig({
         floor: floorCents, ceiling: ceilingCents,
         tickIncrement: parseInt(vjpTick) || 5,
+        numHits,
         enabled: false,
       }).catch(() => {});
     }
@@ -530,6 +535,17 @@ export default function App() {
                 style={{ width: 60, opacity: tournamentActive ? 0.4 : 1 }} />
             </div>
 
+            {/* Số lần rớt jackpot — shared for both modes: guarantees the
+                jackpot fires exactly this many times, at independent random
+                moments spread across the round's duration. */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Số lần rớt JP</span>
+              <input type="number" value={jpNumHits}
+                onChange={e => setJpNumHits(e.target.value)}
+                min="1" step="1" disabled={tournamentActive}
+                style={{ width: 44, opacity: tournamentActive ? 0.4 : 1 }} />
+            </div>
+
             {/* Real JP: contribution rate */}
             {jpMode === 'real' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
@@ -541,13 +557,15 @@ export default function App() {
               </div>
             )}
 
-            {/* Virtual JP: tick increment */}
+            {/* Virtual JP: max tick increment — actual per-tick increment is
+                random between 1 and this value, so the pool climbs
+                irregularly instead of by a mechanically fixed step. */}
             {jpMode === 'virtual' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Credits/tick</span>
+                <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Credits/tick (max)</span>
                 <input type="number" value={vjpTick}
                   onChange={e => setVjpTick(e.target.value)}
-                  min="0" step="1" disabled={tournamentActive}
+                  min="1" step="1" disabled={tournamentActive}
                   style={{ width: 52, opacity: tournamentActive ? 0.4 : 1 }} />
               </div>
             )}

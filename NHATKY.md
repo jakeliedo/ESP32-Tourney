@@ -269,3 +269,56 @@
     đang chạy: backend `:3000`, control-panel `:5173`, leaderboard `:5174`.
 
 ---
+
+## 2026-09-09 (Thứ 4)
+
+- Pull `origin/main` mới nhất về local (đã merge sẵn `EVO1` + 2 commit jackpot
+  REAL/VIRTUAL redesign từ phiên khác). Khởi động lại backend/control-panel/leaderboard
+  sạch (dọn nhiều tiến trình node trùng lặp do IDE tự respawn task, từng gây xung đột
+  cổng 3000).
+
+- **Debug "virtual jackpot không chạy lại ở round 2" — tìm ra root cause thật**:
+  `JackpotHitEntity` (bảng `jackpot_hits`) bị **thiếu trong mảng `entities` ở
+  `app.module.ts`** (nơi TypeORM `synchronize` thực sự dùng để tạo bảng — khác
+  `database.module.ts` chỉ đăng ký cho dependency-injection). Bảng chưa từng tồn tại
+  → mỗi lần jackpot đạt ngưỡng, `INSERT` throw lỗi "relation does not exist", bị
+  `.catch(()=>{})` nuốt âm thầm → tick dừng vĩnh viễn đúng lúc lẽ ra phải nổ (và
+  cũng là nguyên nhân `GET /api/jackpot/hits` trả 500). Xác nhận bằng cách nối
+  thẳng Postgres qua `pg` client. Sửa: thêm `JackpotHitEntity` vào entities list.
+
+- **Redesign lớn theo yêu cầu người dùng — 3 phần:**
+  1. **Ràng buộc jackpot phải nổ trong khung giờ TNM**: bỏ hẳn cơ chế cũ (random
+     hit_value gần `ceiling`, không liên quan gì thời gian). Giờ mỗi round tự
+     detect (so tournament id), vẽ ra `numHits` mốc thời gian **random độc lập**
+     trong toàn bộ `duration_seconds` (có buffer nhỏ 2 đầu), nổ đúng khi elapsed
+     time chạm mốc, trả bằng pool hiện có (kẹp trong [floor, ceiling]) — đảm bảo
+     đúng N lần nổ mỗi round, không phụ thuộc may rủi nữa.
+  2. **Áp dụng cho cả Real JP** (không chỉ Virtual): Real JP trước đây hoàn toàn
+     event-driven (chỉ phản ứng coin-in, không có clock). Thêm 1 `setInterval` 2s
+     riêng (`checkSchedule()`) làm safety-net: nếu tới hạn mà pool (tích từ coin-in
+     thật) chưa đạt ngưỡng, vẫn **ép nổ** đúng lúc, trả tối thiểu = floor. Đã test
+     với 0 coin-in thật — vẫn nổ đúng 2 lần/14s, trả đúng floor mỗi lần.
+  3. **Credits/tick giờ là RANDOM có trần** (chỉ Virtual, theo yêu cầu "để jackpot
+     không bị ảo"): mỗi tick cộng số ngẫu nhiên `1..tickIncrement` thay vì cộng cố
+     định `tickIncrement` — pool leo lên trông tự nhiên hơn. Đổi label UI thành
+     "Credits/tick (max)".
+  - Thêm field `numHits` (UI: "Số lần rớt JP", dùng chung cho cả 2 mode) vào
+    `VirtualJackpotConfigDto`/`RealJackpotConfigDto`, `App.tsx`, `api.ts`.
+  - **Lưu ý đã biết**: vì random độc lập hoàn toàn (không chia đều khung giờ, theo
+    đúng lựa chọn người dùng), N mốc có thể tình cờ dồn cụm gần nhau (đã quan sát
+    thực tế: 3 lần nổ cách nhau đúng ~2s trong 1 round 20s) — đây là hành vi được
+    chấp nhận trước, không phải bug.
+  - Build/type-check pass cả backend lẫn frontend. Đã test trực tiếp qua API thật
+    (không qua UI) cho cả Real và Virtual, nhiều round liên tiếp, xác nhận không
+    còn hiện tượng đóng băng.
+
+- **Sửa video jackpot không phát được**: config/file/serving backend đều đúng
+  (kiểm tra trực tiếp — file tồn tại, `/uploads` serve đúng Content-Type, CORS ổn).
+  Nguyên nhân nhiều khả năng: **trình duyệt chặn autoplay có tiếng** khi gọi
+  `video.play()` bằng code (không phải do người dùng bấm trực tiếp) — bị
+  `.catch(()=>{})` nuốt lỗi, không có dấu hiệu gì. Sửa `Leaderboard.tsx`: thử phát
+  có tiếng trước, nếu bị chặn thì tự fallback sang câm (`muted=true`) để ít nhất
+  hình vẫn chạy, và tự mở lại tiếng ngay khi có tương tác đầu tiên (click/phím)
+  trên trang. Chưa test trực tiếp trên trình duyệt thật (cần xác nhận từ người dùng).
+
+---

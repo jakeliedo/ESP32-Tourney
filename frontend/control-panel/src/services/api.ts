@@ -119,6 +119,7 @@ export interface RealJackpotConfig {
   floor: number;    // credits (e.g. 10000 = $100.00)
   ceiling: number;  // credits (e.g. 1000000 = $10000.00)
   rate: number;     // percentage (e.g. 0.5 = 0.5%)
+  numHits: number;  // guaranteed jackpot hits per round
 }
 
 export const getRealJackpotConfig = (): Promise<RealJackpotConfig> =>
@@ -131,7 +132,8 @@ export const setRealJackpotConfig = (config: RealJackpotConfig): Promise<void> =
 export interface VirtualJackpotConfig {
   floor: number;          // credits (e.g. 10000 = $100.00)
   ceiling: number;        // credits (e.g. 30000 = $300.00)
-  tickIncrement: number;  // credits added per 2s tick (constant, no coin-in dependency)
+  tickIncrement: number;  // max credits added per 2s tick (actual increment is random 1..this)
+  numHits: number;        // guaranteed jackpot hits per round
   enabled: boolean;
 }
 

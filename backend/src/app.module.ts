@@ -17,6 +17,7 @@ import { TransactionEntity } from './database/entities/transaction.entity';
 import { TournamentEntity } from './database/entities/tournament.entity';
 import { PlayerEntity } from './database/entities/player.entity';
 import { RoundResultEntity } from './database/entities/round_result.entity';
+import { JackpotHitEntity } from './database/entities/jackpot_hit.entity';
 
 @Module({
   imports: [
@@ -33,7 +34,7 @@ import { RoundResultEntity } from './database/entities/round_result.entity';
         database: cfg.get('DB_NAME'),
         username: cfg.get('DB_USER'),
         password: cfg.get('DB_PASS'),
-        entities: [MachineEntity, TransactionEntity, TournamentEntity, PlayerEntity, RoundResultEntity],
+        entities: [MachineEntity, TransactionEntity, TournamentEntity, PlayerEntity, RoundResultEntity, JackpotHitEntity],
         synchronize: cfg.get('NODE_ENV') !== 'production',
         logging: false,
       }),

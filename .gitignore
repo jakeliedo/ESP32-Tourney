@@ -7,6 +7,7 @@ firmware/include/secrets.h
 backend/node_modules/
 backend/dist/
 backend/.env
+backend/uploads/
 
 # ── Frontend ─────────────────────────────────────────────────
 frontend/control-panel/node_modules/

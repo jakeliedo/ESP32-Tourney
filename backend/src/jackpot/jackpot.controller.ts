@@ -19,7 +19,8 @@ import { JackpotHitEntity } from '../database/entities/jackpot_hit.entity';
 interface VirtualJackpotConfigDto {
   floor: number;          // credits (e.g. 10000 = $100.00)
   ceiling: number;        // credits (e.g. 30000 = $300.00)
-  tickIncrement: number;  // credits added per 2s tick (constant, no coin-in dependency)
+  tickIncrement: number;  // max credits added per 2s tick (actual is random 1..this)
+  numHits: number;        // guaranteed jackpot hits per round
   enabled: boolean;
 }
 
@@ -27,6 +28,7 @@ interface RealJackpotConfigDto {
   floor: number;    // credits
   ceiling: number;  // credits
   rate: number;     // percentage (e.g. 0.5 = 0.5%)
+  numHits: number;  // guaranteed jackpot hits per round
 }
 
 @Controller('api/jackpot')
@@ -63,7 +65,7 @@ export class JackpotController {
 
   @Post('config')
   async setRealConfig(@Body() dto: RealJackpotConfigDto) {
-    await this.svc.configure(dto.floor, dto.ceiling, dto.rate);
+    await this.svc.configure(dto.floor, dto.ceiling, dto.rate, dto.numHits);
     return { ok: true };
   }
 
@@ -91,7 +93,7 @@ export class JackpotController {
 
   @Post('virtual/config')
   async setVirtualConfig(@Body() dto: VirtualJackpotConfigDto) {
-    await this.vjp.configure(dto.floor, dto.ceiling, dto.tickIncrement, dto.enabled);
+    await this.vjp.configure(dto.floor, dto.ceiling, dto.tickIncrement, dto.numHits, dto.enabled);
     return { ok: true };
   }
 
