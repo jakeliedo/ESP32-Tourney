@@ -64,6 +64,32 @@ SasCreditResponse sas_parse_credits(const uint8_t* buf, size_t len) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Long Poll 11 – Send Total Coin In Meter (Section 7.1, single meter)
+// Request:  [ADDR(MARK)] [0x11(SPACE)] [CRC_L] [CRC_H]
+// Response: [ADDR] [0x11] [BCD_4_BYTES] [CRC_L] [CRC_H]
+// Identical frame shape to LP 0x1A -- lifetime/cumulative meter, never
+// resets, host must snapshot-and-diff per round (see sas_polling.cpp).
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_total_coin_in(uint8_t* buf, uint8_t address) {
+    buf[0] = address;
+    buf[1] = SAS_CMD_SEND_TOTAL_COIN_IN;
+    crc16_append(buf, 2);
+    return 4;
+}
+
+SasTotalCoinInResponse sas_parse_total_coin_in(const uint8_t* buf, size_t len) {
+    SasTotalCoinInResponse resp = {0, false};
+    if (len < 8) return resp;
+    if (!crc16_verify(buf, len)) return resp;
+    if (buf[1] != SAS_CMD_SEND_TOTAL_COIN_IN) return resp;
+
+    resp.coin_in = bcd_to_uint32(&buf[2], 4);
+    resp.valid   = true;
+    return resp;
+}
+
+// ─────────────────────────────────────────────────────────────
 // Long Poll 1B – Send Handpay Information
 // ─────────────────────────────────────────────────────────────
 
@@ -87,25 +113,91 @@ SasHandpayResponse sas_parse_handpay(const uint8_t* buf, size_t len) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Long Poll AF – Extended Meters
+// Long Poll AF – Extended Meters (Alternate)
+//
+// Fixed 2026-09-10: the previous implementation sent a bare 4-byte frame
+// ([addr][0xAF][CRC]) with NO payload at all. LP 0xAF/0x6F are variable-
+// length commands (Section 7.21, Table 7.21a/7.21b) that REQUIRE a
+// length byte, a 2-BCD game_number, and an explicit list of 2-byte meter
+// codes (see Table C-7, Appendix C) -- the machine has no way to know
+// which meters are being asked for from a bare 4-byte poll, so it almost
+// certainly silently ignored every request. This is very likely the real
+// reason this project's test machine "never responded to Meters" (first
+// noted 2026-09-05) -- not a hardware/firmware limitation on the
+// machine's side at all.
+//
+// Request:  [ADDR(MARK)] [0xAF] [length] [game_number:2 BCD]
+//           [meter_code:2 binary]... [CRC_L] [CRC_H]
+// Response: [ADDR] [0xAF] [length] [game_number:2 BCD]
+//           {[meter_code:2 binary][size:1][value:size BCD]}... [CRC_L] [CRC_H]
+//
+// Meter codes are "2 binary" per Table 7.21a -- LSB-first per Section
+// 2.2.3 (the same binary-field byte-order rule as AFT's Asset Number/POS
+// ID), NOT BCD/ASCII. game_number is BCD; 0000 = "the gaming machine"
+// (terminal-wide), not a specific game. We request exactly the 3 meters
+// this project actually uses: 0x0000 Total Coin In, 0x0001 Total Coin
+// Out, 0x0005 Games Played (codes per Table C-7).
 // ─────────────────────────────────────────────────────────────
+
+#define SAS_METER_CODE_COIN_IN      0x0000
+#define SAS_METER_CODE_COIN_OUT     0x0001
+#define SAS_METER_CODE_GAMES_PLAYED 0x0005
 
 size_t sas_build_lp_meters(uint8_t* buf, uint8_t address) {
     buf[0] = address;
     buf[1] = SAS_CMD_METERS_POLL;
-    crc16_append(buf, 2);
-    return 4;
+
+    size_t idx = 3;             // buf[2] = length, filled in below
+    buf[idx++] = 0x00;          // game_number (2 BCD) = 0000 -- gaming machine, not a specific game
+    buf[idx++] = 0x00;
+
+    // Meter codes, 2 binary each, LSB-first (low byte, then high byte)
+    buf[idx++] = (uint8_t)(SAS_METER_CODE_COIN_IN);
+    buf[idx++] = (uint8_t)(SAS_METER_CODE_COIN_IN >> 8);
+    buf[idx++] = (uint8_t)(SAS_METER_CODE_COIN_OUT);
+    buf[idx++] = (uint8_t)(SAS_METER_CODE_COIN_OUT >> 8);
+    buf[idx++] = (uint8_t)(SAS_METER_CODE_GAMES_PLAYED);
+    buf[idx++] = (uint8_t)(SAS_METER_CODE_GAMES_PLAYED >> 8);
+
+    buf[2] = (uint8_t)(idx - 3);  // length excludes addr, cmd, and the length byte itself
+
+    crc16_append(buf, idx);
+    return idx + 2;
 }
 
 SasMetersResponse sas_parse_meters(const uint8_t* buf, size_t len) {
     SasMetersResponse resp = {0, 0, 0, false};
-    if (len < 16) return resp;
+    // Minimum: addr+cmd+length+game_number(2)+CRC(2) = 7, even with zero meters returned.
+    if (len < 7) return resp;
     if (!crc16_verify(buf, len)) return resp;
+    if (buf[1] != SAS_CMD_METERS_POLL) return resp;
 
-    resp.coin_in      = bcd_to_uint32(&buf[2], 4);
-    resp.coin_out     = bcd_to_uint32(&buf[6], 4);
-    resp.games_played = bcd_to_uint32(&buf[10], 4);
-    resp.valid        = true;
+    uint8_t declared_len = buf[2];
+    size_t  payload_end  = 3 + declared_len;      // end of game_number+meters, right before CRC
+    size_t  actual_end   = len - 2;                // CRC is always the last 2 bytes actually received
+    if (payload_end > actual_end) payload_end = actual_end;  // defensive clamp
+
+    size_t idx = 3 + 2;  // skip addr,cmd,length + game_number(2 BCD) -- start of first code/size/value triple
+    bool got_any = false;
+
+    while (idx + 3 <= payload_end) {
+        uint16_t code = (uint16_t)buf[idx] | ((uint16_t)buf[idx + 1] << 8);  // LSB-first
+        uint8_t  size = buf[idx + 2];
+        idx += 3;
+        if (idx + size > payload_end) break;  // malformed/truncated -- stop parsing safely
+
+        uint32_t value = (size > 0) ? bcd_to_uint32(&buf[idx], size) : 0;
+        idx += size;
+
+        switch (code) {
+            case SAS_METER_CODE_COIN_IN:      resp.coin_in      = value; got_any = true; break;
+            case SAS_METER_CODE_COIN_OUT:     resp.coin_out     = value; got_any = true; break;
+            case SAS_METER_CODE_GAMES_PLAYED: resp.games_played = value; got_any = true; break;
+            default: break;  // meter we didn't ask about -- ignore
+        }
+    }
+
+    resp.valid = got_any;
     return resp;
 }
 

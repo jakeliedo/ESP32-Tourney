@@ -322,3 +322,108 @@
   trên trang. Chưa test trực tiếp trên trình duyệt thật (cần xác nhận từ người dùng).
 
 ---
+
+## 2026-09-10 (Thứ 5)
+
+- Đầu phiên: kiểm tra commit mới nhất trên `main` theo yêu cầu người dùng — xác nhận
+  `git fetch` không có commit nào mới kể từ phiên trước (`235707d`, 2026-09-09 09:16).
+  Local đã khớp `origin/main`, không có gì cần pull thêm.
+
+- Khởi động lại backend/control-panel/leaderboard (2/3 đã chạy sẵn, chỉ thiếu
+  leaderboard). Người dùng chạy tournament thật (round id=30, mode=REAL) và báo ô
+  jackpot trên leaderboard không chạy.
+
+- **Bug thật tìm được**: `JackpotService` (Real JP) **chưa từng gọi
+  `broadcastJackpotPool()`** ở bất kỳ đâu — khác `VirtualJackpotService` đã có sẵn.
+  Từ lúc redesign 2026-09-09 thêm `checkSchedule()` (chạy mỗi 2s), nó chỉ lo phần
+  "tới hạn thì ép nổ", quên hẳn việc phát trực tiếp giá trị pool ra leaderboard.
+  Kết quả: khi chạy mode REAL, ô jackpot trên leaderboard hoàn toàn im lặng, không
+  có sự kiện `jackpot_pool_update` nào được gửi cả (không phải lỗi hiển thị/socket
+  — đơn giản là backend chưa từng gửi). Sửa: thêm `broadcastJackpotPool()` mỗi tick
+  trong `checkSchedule()`, giống hệt Virtual JP.
+  - Xác nhận với round đang chạy thật: pool hiện đứng ở đúng `floor=10000` (máy
+    `coin_in:0`, chưa ai chơi thật nên chưa tích lũy gì) — không phải bug, nhưng
+    round vẫn đảm bảo nổ đủ `numHits=2` trong 180s nhờ cơ chế ép nổ theo lịch.
+  - Type-check pass. Chưa commit/push — chờ xác nhận.
+
+- **Người dùng báo "chơi thử nhưng JP thật không tăng, rớt ngay giá trị ban đầu"
+  — tìm ra 2 nguyên nhân, 1 mới sửa + 1 giới hạn cũ đã biết:**
+  1. **Bug thật (đã sửa)**: `processCoinIn(machineId, amount)` — hàm đáng lẽ được
+     gọi mỗi khi có telemetry để cộng dồn coin-in vào pool — **chưa từng được gọi
+     ở đâu cả** trong `mqtt-gateway.service.ts` (field `lastCoinIn` cũng khai báo
+     sẵn nhưng chưa dùng). Nghĩa là dù coin-in thật có tăng, pool Real JP vẫn
+     không bao giờ cộng dồn. Sửa: gộp thẳng logic tính delta coin-in (đọc từ Redis
+     digital twin `machine:{id}`, theo đúng pattern cũ của Virtual JP trước khi
+     redesign) vào chu kỳ `checkSchedule()` có sẵn (2s/lần) — không cần gọi chéo
+     service nữa, tránh luôn circular dependency giữa `JackpotService` ↔
+     `MqttGatewayService`.
+  2. **Giới hạn phần cứng đã biết từ trước, không phải bug mới**: `coin_in` trong
+     telemetry lấy từ LP 0xAF (Meters poll) — máy EGT hiện tại **chưa từng trả lời
+     LP 0xAF** (đã ghi nhận từ 2026-09-05, xem mục "Việc còn tồn đọng" trong
+     CLAUDE.md). Xác nhận trực tiếp qua Redis: `machine:01` cập nhật `updated_at`
+     đều mỗi giây (máy vẫn sống, vẫn polling) nhưng `coin_in` đứng yên ở `0` xuyên
+     suốt. → Dù sửa xong bug #1, Real JP vẫn sẽ không thấy tăng **trên máy này**
+     cho tới khi LP 0xAF được giải quyết — đây là việc tồn đọng cũ, không phải lỗi
+     mới phát sinh hôm nay.
+  - Test thử bằng cách bơm giả `coin_in` trực tiếp qua Redis: bị máy thật ghi đè
+    lại về `0` trong vòng ~1s (do board vẫn đang polling thật), nên không thể xác
+    nhận trực tiếp trên máy này — nhưng logic đã đối chiếu đúng theo pattern cũ.
+  - Type-check pass. Chưa commit/push — chờ xác nhận từ người dùng.
+
+- **Thêm LP 0x11 (Send Total Coin In Meter) làm nguồn dữ liệu thứ 2**, độc lập
+  hẳn với họ "selected meters" (0x2F/0x6F/0xAF) đã biết hỏng — vì đây là cơ chế
+  đơn giản, khung 8-byte y hệt LP 0x1A (Credits) đã chạy hoàn hảo. Nếu máy trả lời
+  được, tự động ưu tiên dùng số liệu thật này thay cho suy luận từ credit-delta.
+
+- **PHÁT HIỆN LỚN — người dùng đưa thông tin (dù sai vài chỗ) giúp lật lại giả
+  thuyết cũ**: nghi ngờ `0xAF` "máy không hỗ trợ" **có thể chỉ là bug framing của
+  chính firmware từ đầu**, không phải giới hạn phần cứng. Đối chiếu spec gốc
+  (Table 7.21a/7.21b, Table C-7 Appendix C — tra trực tiếp qua bản PDF):
+  - `sas_build_lp_meters()` cũ gửi khung **trơ 4-byte** `[addr][0xAF][CRC]` —
+    **hoàn toàn thiếu** byte length, field `game_number` (2 BCD), và danh sách
+    mã bộ đếm (2-byte binary/máy, LSB-first theo Section 2.2.3) — đây là lệnh
+    **độ dài biến đổi bắt buộc phải khai payload**, gửi khung trơ gần như chắc
+    chắn bị máy lờ đi từ đầu.
+  - Sửa: `sas_build_lp_meters()` giờ dựng đúng khung `[addr][0xAF][length]
+    [game_number=0000][mã 0x0000 Coin In][mã 0x0001 Coin Out][mã 0x0005 Games
+    Played][CRC]` (13 byte, tăng buffer `lp_frame` từ 8→16). `sas_parse_meters()`
+    viết lại parser duyệt từng bộ ba (code/size/value) theo đúng Table 7.21b.
+  - Nhân tiện sửa luôn thông tin sai trong tài liệu người dùng đưa: `0x12`
+    KHÔNG PHẢI Total Coin In (đó là **Total Coin Out**) — mã đúng cho Total
+    Coin In là **`0x11`** theo Appendix B; `0x16` là Games Won chứ không phải
+    Games Played (`0x15`).
+  - Nếu 0xAF (đã sửa) hoặc 0x11 phản hồi được trên máy thật, tự động lấy làm
+    nguồn `coin_in` chính thức (ưu tiên hơn suy luận credit-delta hôm qua), log
+    rõ "CONFIRMED WORKING" ngay lần đầu thành công.
+  - Build OK. Chưa flash lại — chờ vào boot mode.
+
+- **2 tính năng mới theo yêu cầu người dùng, đã implement (build OK):**
+  1. **Đóng băng cộng dồn jackpot khi cửa máy mở (Door Open)**: thêm case
+     `SAS_EXC_SLOT_DOOR_OPENED`/`CLOSED` (0x11/0x12) vào state machine trong
+     `sas_polling_task()`. Khi cửa mở, cờ `jackpot_freeze` bật lên — suy luận
+     wager-từ-credit-delta bỏ qua mọi lần credit giảm (không cộng dồn), tránh
+     kỹ thuật viên chỉnh credit thủ công lúc bảo trì bị hiểu nhầm thành tiền
+     cược thật. Cửa đóng lại → tự động resume. (Không cần chặn số liệu Meters/LP
+     0x11 thật vì bản thân bộ đếm thật của máy không tăng khi không có cược
+     thật, chỉ suy luận credit-delta mới cần chặn.)
+  2. **Retry giao dịch AFT jackpot bị treo do máy đang chơi dở**: `recover_pending_aft()`
+     trước đây chỉ chạy 1 lần lúc boot — nếu 1 lần trả jackpot bị máy từ chối vì
+     đang mid-game (status `0x87` "unable to perform transfers now — door
+     open/tilt/disabled/cashout in progress"), giao dịch nằm im trong NVS tới
+     tận lần reboot sau, không ai đứng đó để bấm lại bằng tay (khác buy-in thủ
+     công). Sửa: gọi hàm này định kỳ mỗi ~10s ngay trong vòng lặp chính (không
+     chỉ lúc boot) — an toàn gọi lặp lại vì tự nhận biết "không có gì đang chờ"
+     và bỏ qua ngay.
+
+- **Phát hiện thêm (nhân tiện, không phải yêu cầu trực tiếp) — bộ define
+  `SAS_EXC_*` dùng cho state-machine logic bị lệch khỏi bảng string `exc_name()`
+  đã sửa từ 2026-09-05**: `SAS_EXC_HANDPAY_PENDING` trỏ nhầm `0x44` ("Reel 4
+  tilt") thay vì `0x51` thật — sửa lại đúng. `SAS_EXC_REEL_SPIN_BEGIN=0x27`
+  ("Cashbox full") **xoá hẳn** — "Game Start" theo spec (Section 12.5.3) chỉ là
+  Real Time Event message, **không tồn tại như 1 exception General Poll bình
+  thường** — nghĩa là `SLOT_STATE_PLAYING` chưa từng được set đúng từ đầu dự án
+  (đã xác nhận không có code nào khác phụ thuộc state này qua grep, xoá an
+  toàn). `SAS_EXC_CASHOUT_PRESSED`/`CASHOUT_TICKET` cũng sai nhưng chưa từng
+  được dùng ở đâu (dead code) — sửa giá trị cho đúng luôn, phòng dùng sau này.
+
+---

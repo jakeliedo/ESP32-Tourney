@@ -2,8 +2,18 @@
 // jackpot.service.ts – Mystery Jackpot Engine (Real JP)
 //
 // Algorithm (2026-09-09 redesign, mirrors VirtualJackpotService):
-//  1. Pool grows from real coin-in (contributionRate % of each wager) via
-//     processCoinIn() -- unchanged, still genuinely reflects real play.
+//  1. Pool grows from real coin-in (contributionRate % of each wager),
+//     computed as a coin-in DELTA per machine every 2s tick (see
+//     accrueCoinIn(), called from checkSchedule()) -- reading each
+//     tournament machine's live coin_in meter from the Redis digital twin
+//     (kept fresh by MqttGatewayService.processTelemetry()). NOTE
+//     (2026-09-10): this used to be a separate processCoinIn(machineId,
+//     amount) method meant to be called per telemetry event, but nothing
+//     ever called it -- the pool never actually grew from real play at
+//     all. Folded into this service's own ticker instead so it's
+//     self-contained (also avoids a circular dependency, since
+//     MqttGatewayService is already a constructor dependency of this
+//     service for sending the AFT_PUMP payout).
 //  2. Each round (tournament) is auto-detected by a periodic 2s check
 //     (checkSchedule()) the same way Virtual JP does -- pool resets to
 //     floor and a schedule of `numHits` target fire-times is drawn: each
@@ -41,6 +51,7 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
   private floor: number;
   private ceiling: number;
   private numHits = 1;   // guaranteed jackpot hits per round
+  private lastCoinIn = new Map<string, number>();  // machineId -> last-seen cumulative coin_in
 
   constructor(
     private cfg: ConfigService,
@@ -112,26 +123,6 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  // ── Called by Device Gateway for every coin-in event ─────
-
-  async processCoinIn(machineId: string, coinInAmount: number): Promise<void> {
-    // Only contribute when mode is 'real' AND a tournament is currently running
-    const mode = await this.redis.get('jackpot:mode');
-    if (mode === 'virtual') return;
-
-    const active = await this.tournaments.findOne({
-      where: { status: TournamentStatus.ACTIVE },
-      order: { id: 'DESC' },
-    });
-    if (!active) return;
-
-    // Pool only accrues here -- firing is schedule-driven (see
-    // checkSchedule()), not threshold-driven, so the jackpot is guaranteed
-    // to land within the round regardless of how much coin-in occurs.
-    const contribution = coinInAmount * this.contributionRate;
-    await this.redis.incrementJackpotPool(contribution);
-  }
-
   // ── Scheduled firing (2s tick, mirrors VirtualJackpotService.tick()) ──
 
   private async checkSchedule(): Promise<void> {
@@ -147,14 +138,24 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
     const armedId = await this.redis.get('jackpot:armed_tournament_id');
     let targets: number[];
     let hitIdx: number;
+    const isNewRound = armedId !== String(active.id);
 
-    if (armedId !== String(active.id)) {
+    if (isNewRound) {
       targets = this.scheduleTargets(active.duration_seconds);
       hitIdx  = 0;
       await this.redis.set('jackpot:armed_tournament_id', String(active.id));
       await this.redis.set('jackpot:targets', JSON.stringify(targets));
       await this.redis.set('jackpot:hit_idx', '0');
       await this.redis.resetJackpotPool(this.floor);
+      // Reseed the coin-in baseline to each machine's CURRENT meter value
+      // so this round's accrual starts from zero, instead of counting
+      // whatever coin-in happened between rounds (or before this service
+      // last saw the machine) as a false contribution.
+      this.lastCoinIn.clear();
+      for (const machineId of active.machine_ids) {
+        const state = await this.redis.getMachineState(machineId);
+        if (state?.coin_in) this.lastCoinIn.set(machineId, parseInt(state.coin_in));
+      }
     } else {
       const targetsStr = await this.redis.get('jackpot:targets');
       targets = targetsStr ? JSON.parse(targetsStr) : [];
@@ -162,12 +163,38 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
       hitIdx = idxStr ? parseInt(idxStr) : 0;
     }
 
+    // Accrue real coin-in since the last tick, across this round's
+    // machines -- the Redis digital twin's coin_in is kept fresh by
+    // MqttGatewayService.processTelemetry() independently of this service.
+    if (!isNewRound) {
+      let totalDelta = 0;
+      for (const machineId of active.machine_ids) {
+        const state = await this.redis.getMachineState(machineId);
+        if (!state?.coin_in) continue;
+        const current = parseInt(state.coin_in);
+        const last    = this.lastCoinIn.get(machineId) ?? current;
+        const delta   = current - last;
+        if (delta > 0) totalDelta += delta;
+        this.lastCoinIn.set(machineId, current);
+      }
+      if (totalDelta > 0) {
+        await this.redis.incrementJackpotPool(totalDelta * this.contributionRate);
+      }
+    }
+
+    // Broadcast the live pool every tick, same as VirtualJackpotService --
+    // without this, the leaderboard's jackpot panel never updates at all
+    // while in 'real' mode (it's driven purely by this socket event, and
+    // nothing else in this service ever emitted it).
+    const currentPool = await this.redis.getJackpotPool();
+    this.leaderboard.broadcastJackpotPool(Math.round(currentPool));
+
     if (hitIdx >= targets.length || !active.started_at) return;
 
     const elapsedSec = (Date.now() - new Date(active.started_at).getTime()) / 1000;
     if (elapsedSec < targets[hitIdx]) return;
 
-    const pool   = await this.redis.getJackpotPool();
+    const pool   = currentPool;
     const amount = Math.round(Math.min(Math.max(pool, this.floor), this.ceiling));
 
     const rankings = await this.redis.getLeaderboard(active.id);

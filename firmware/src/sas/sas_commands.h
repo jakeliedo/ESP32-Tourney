@@ -15,6 +15,16 @@
 #define SAS_CMD_DISABLE_BILL        0x07  // Long Poll 07: Disable Bill Acceptor – Type S
 #define SAS_CMD_SEND_CREDITS        0x1A  // Long Poll 1A: Current Credit Meter
 #define SAS_CMD_SEND_HANDPAY        0x1B  // Long Poll 1B: Handpay Information
+// Long Poll 11: Send Total Coin In Meter (Section 7.1, single 4-byte BCD
+// meter -- same frame shape as LP 0x1A). Lifetime/cumulative, never resets
+// -- the host must snapshot-and-diff per round, same as any SAS meter.
+// Distinct legacy mechanism from the "selected/extended meters" family
+// (LP 0x2F/0x6F/0xAF all share the identical spec description "Send
+// selected meters for gaming machine" -- likely the same underlying
+// firmware subsystem under different framings). Worth trying on a machine
+// where 0xAF never responds (confirmed 2026-09-05 on this project's test
+// machine) since 0x11 is architecturally separate.
+#define SAS_CMD_SEND_TOTAL_COIN_IN  0x11
 #define SAS_CMD_METERS_POLL         0xAF  // Long Poll AF: Extended Meters
 #define SAS_CMD_METERS_POLL_6F      0x6F  // Long Poll 6F: Legacy Meters
 #define SAS_CMD_SEND_VERSION_SERIAL 0x54  // Long Poll 54: Send SAS Version ID & Gaming Machine Serial Number
@@ -166,14 +176,25 @@
 #define AFT_STATUS_NO_INFO          0xFF  // No transfer information available
 
 // ── SAS Exception Codes (General Poll responses) ─────────────
+// Fixed 2026-09-10: SAS_EXC_CASHOUT_PRESSED/HANDPAY_PENDING/CASHOUT_TICKET
+// held stale values from before the 2026-09-05 Appendix A correction pass
+// that fixed exc_name()'s STRING table -- these separate #define
+// constants (used for actual state-machine comparisons, not just
+// logging) were never updated to match and drifted out of sync. Verified
+// against exc_name()'s corrected table below. SAS_EXC_REEL_SPIN_BEGIN
+// removed entirely: "Game Start" (Section 12.5.3) is a Real Time Event
+// message, NOT a regular Appendix A general-poll exception -- it can
+// never fire in this project's standard polling mode, so 0x27 ("Cashbox
+// full detected") was never a valid substitute and had no correct one to
+// replace it with. SLOT_STATE_PLAYING is consequently unreachable; no
+// other code depends on it (verified via grep before removing).
 #define SAS_EXC_NO_ACTIVITY         0x00
 #define SAS_EXC_SLOT_DOOR_OPENED    0x11
 #define SAS_EXC_SLOT_DOOR_CLOSED    0x12
-#define SAS_EXC_REEL_SPIN_BEGIN     0x27
-#define SAS_EXC_CASHOUT_PRESSED     0x26
-#define SAS_EXC_HANDPAY_PENDING     0x44
-#define SAS_EXC_CASHOUT_TICKET      0x4C
-#define SAS_EXC_AFT_TRANSFER_DONE   0x67
+#define SAS_EXC_CASHOUT_PRESSED     0x66  // was 0x26 (wrong)
+#define SAS_EXC_HANDPAY_PENDING     0x51  // was 0x44 ("Reel 4 tilt", wrong)
+#define SAS_EXC_CASHOUT_TICKET      0x3D  // was 0x4C ("$100.00 bill accepted", wrong)
+#define SAS_EXC_AFT_TRANSFER_DONE   0x67  // NOTE: only used as our OWN synthetic telemetry marker (see report_event() call sites) -- never matched against an incoming exception byte, so this mismatch with the real spec code (0x69) has no functional effect. Left as-is to avoid an unrelated telemetry-format change.
 
 // ─────────────────────────────────────────────────────────────
 // Parsed response structures
@@ -183,6 +204,11 @@ typedef struct {
     uint32_t credits;       // Current credit meter value
     bool     valid;
 } SasCreditResponse;
+
+typedef struct {
+    uint32_t coin_in;       // Total Coin In meter (lifetime, accounting-denom units)
+    bool     valid;
+} SasTotalCoinInResponse;
 
 typedef struct {
     uint32_t handpay_amount; // Amount in credits (BCD decoded)
@@ -313,6 +339,7 @@ size_t sas_build_lp_simple(uint8_t* buf, uint8_t address, uint8_t cmd);
  * @return frame length
  */
 size_t sas_build_lp_credits(uint8_t* buf, uint8_t address);
+size_t sas_build_lp_total_coin_in(uint8_t* buf, uint8_t address);
 
 /**
  * Build Long Poll 1B – Request Handpay Information.
@@ -457,6 +484,7 @@ size_t sas_build_lp_machine_info(uint8_t* buf, uint8_t address);
 // ─────────────────────────────────────────────────────────────
 
 SasCreditResponse       sas_parse_credits(const uint8_t* buf, size_t len);
+SasTotalCoinInResponse  sas_parse_total_coin_in(const uint8_t* buf, size_t len);
 SasHandpayResponse      sas_parse_handpay(const uint8_t* buf, size_t len);
 SasMetersResponse       sas_parse_meters(const uint8_t* buf, size_t len);
 SasAftResponse          sas_parse_aft(const uint8_t* buf, size_t len);

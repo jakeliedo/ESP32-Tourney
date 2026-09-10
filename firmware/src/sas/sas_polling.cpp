@@ -891,11 +891,50 @@ static void recover_pending_aft() {
 void sas_polling_task(void* pvParameters) {
     ESP_LOGI(TAG, "SAS Polling Task started on Core %d", xPortGetCoreID());
 
-    uint8_t  lp_frame[8];
+    // lp_frame sized for the largest single request built in this loop --
+    // the LP 0xAF meters request (game_number + 3 meter codes) now needs
+    // 13 bytes, up from the old bare 4-byte (unpayloaded, broken) version.
+    uint8_t  lp_frame[16];
     uint8_t  resp_buf[32];
     uint32_t last_credits  = 0;
     uint32_t last_coin_in  = 0;
     uint32_t last_coin_out = 0;
+
+    // Coin-in inferred from the credit meter (2026-09-10): this machine
+    // never responds to LP 0xAF (Meters), so `last_coin_in` above never
+    // moves from 0 -- the real coin-in meter is simply unreachable on this
+    // hardware. Per SAS 6.02 Section 10.3, "the host can also request the
+    // gaming machine's coin in meter and calculate a delta amount" is only
+    // one of three documented ways to get wagering activity; since that
+    // one is unavailable here, fall back to inferring it from the credit
+    // meter we DO reliably have (LP 0x1A): any DECREASE in credits between
+    // polls is a wager (a spin consuming credits), so accumulate those
+    // decreases as a substitute coin-in figure. This is an approximation
+    // (it can't distinguish "bet and lost" from certain rare edge cases),
+    // but it is the only source of real wagering activity this machine
+    // will ever give us, and it directly feeds the real jackpot's
+    // coin-in-based accrual (see JackpotService.checkSchedule() on the
+    // backend, which just reads whatever is in this telemetry field).
+    uint32_t inferred_wagered_cents      = 0;
+    bool     suppress_next_wager_decrease = false;  // set when WE cause a credit drop (AFT withdraw), not the player
+
+    // Real Total Coin In meter (LP 0x11, Section 7.1) -- tried alongside
+    // the inference above since it's a distinct legacy mechanism from the
+    // already-confirmed-broken "selected/extended meters" family (LP
+    // 0x2F/0x6F/0xAF). If this machine ever responds validly, its real
+    // lifetime meter is authoritative and takes over from the credit-delta
+    // approximation for all subsequent telemetry.
+    uint32_t real_coin_in_cents = 0;
+    bool     real_coin_in_valid = false;
+
+    // Freeze jackpot wager-inference while the slot door is open (2026-09-10,
+    // requested feature): a technician servicing the machine can add/remove
+    // test credits, which would otherwise look exactly like a player wager
+    // to the credit-delta inference above and falsely inflate the jackpot.
+    // Only gates the INFERENCE (see credits-poll block below) -- a real
+    // Total Coin In meter (LP 0x11/0xAF) wouldn't increment from a manual
+    // credit adjustment in the first place, so it needs no such guard.
+    bool jackpot_freeze = false;
 
     // Synchronize to the machine's poll cycle (SAS 6.02 Section 3.3)
     // before anything else -- see sas_send_sync_broadcast() for why.
@@ -952,6 +991,10 @@ void sas_polling_task(void* pvParameters) {
                     }
                     ESP_LOGI(TAG, "AFT OUT recv: amount=%lu credits  txn=%s",
                              (unsigned long)cmd.amount, cmd.txn_id);
+                    // The upcoming credit drop is US cashing the machine
+                    // out, not a player wagering -- don't let the
+                    // credit-delta wager inference (below) count it.
+                    suppress_next_wager_decrease = true;
                     execute_aft_command(&cmd);
                     break;
                 case CMD_LOCK:
@@ -1005,11 +1048,21 @@ void sas_polling_task(void* pvParameters) {
                 }
                 break;
 
-            case SAS_EXC_REEL_SPIN_BEGIN:
-                if (s_state == SLOT_STATE_IDLE || s_state == SLOT_STATE_TOURNAMENT_LOCKED) {
-                    s_state = SLOT_STATE_PLAYING;
-                }
-                ESP_LOGI(TAG, "EXC 0x27: Reel spin begin (game started)");
+            case SAS_EXC_SLOT_DOOR_OPENED:
+                jackpot_freeze = true;
+                ESP_LOGW(TAG, "EXC 0x11: Slot door OPENED -- freezing jackpot wager-inference "
+                              "until door closes (service access, not real player activity)");
+                report_event(exception, last_credits,
+                             real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                             last_coin_out, 0, NULL);
+                break;
+
+            case SAS_EXC_SLOT_DOOR_CLOSED:
+                jackpot_freeze = false;
+                ESP_LOGI(TAG, "EXC 0x12: Slot door CLOSED -- jackpot wager-inference resumed");
+                report_event(exception, last_credits,
+                             real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                             last_coin_out, 0, NULL);
                 break;
 
             case SAS_EXC_HANDPAY_PENDING:
@@ -1022,13 +1075,13 @@ void sas_polling_task(void* pvParameters) {
                         SasHandpayResponse hp = sas_parse_handpay(resp_buf, hn);
                         if (hp.valid) {
                             uint32_t hp_cents = credits_to_cents(hp.handpay_amount);
-                            ESP_LOGW(TAG, "EXC 0x44: HANDPAY pending – amount=%lu ($%.2f)",
+                            ESP_LOGW(TAG, "EXC 0x51: HANDPAY pending – amount=%lu ($%.2f)",
                                      (unsigned long)hp.handpay_amount,
                                      hp_cents / 100.0f);
                             report_event(exception, hp_cents, 0, 0, 0, NULL);
                         }
                     } else {
-                        ESP_LOGW(TAG, "EXC 0x44: HANDPAY pending – no amount response");
+                        ESP_LOGW(TAG, "EXC 0x51: HANDPAY pending – no amount response");
                     }
                 }
                 break;
@@ -1036,7 +1089,9 @@ void sas_polling_task(void* pvParameters) {
             default:
                 if (exception != SAS_EXC_NO_ACTIVITY) {
                     ESP_LOGI(TAG, "EXC 0x%02X: %s", exception, exc_name(exception));
-                    report_event(exception, last_credits, last_coin_in, last_coin_out, 0, NULL);
+                    report_event(exception, last_credits,
+                                 real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                                 last_coin_out, 0, NULL);
                 }
                 break;
         }
@@ -1063,6 +1118,23 @@ void sas_polling_task(void* pvParameters) {
                     ESP_LOGI(TAG, "Credits: %lu raw (denom-converted %lu) (%+ld)  $%.2f",
                              (unsigned long)cr.credits, (unsigned long)cr_cents, (long)delta,
                              cr_cents / 100.0f);
+
+                    if (delta < 0) {
+                        if (suppress_next_wager_decrease) {
+                            ESP_LOGI(TAG, "Wager-infer: credit drop of %ld ignored (our own AFT withdraw)",
+                                     (long)(-delta));
+                            suppress_next_wager_decrease = false;
+                        } else if (jackpot_freeze) {
+                            ESP_LOGI(TAG, "Wager-infer: credit drop of %ld ignored (slot door open -- "
+                                          "likely a service adjustment, not a real wager)", (long)(-delta));
+                        } else {
+                            inferred_wagered_cents += (uint32_t)(-delta);
+                            ESP_LOGI(TAG, "Wager-infer: +%ld  cumulative=%lu ($%.2f)",
+                                     (long)(-delta), (unsigned long)inferred_wagered_cents,
+                                     inferred_wagered_cents / 100.0f);
+                        }
+                    }
+
                     last_credits = cr_cents;
                 }
             } else {
@@ -1095,12 +1167,83 @@ void sas_polling_task(void* pvParameters) {
                     }
                     last_coin_in  = coin_in_cents;
                     last_coin_out = coin_out_cents;
+                    // Meters (LP 0xAF) now correctly requests real meters
+                    // (fixed 2026-09-10 -- was sending an unpayloaded,
+                    // guaranteed-to-be-ignored request before). If it
+                    // responds validly, its coin_in is just as authoritative
+                    // as LP 0x11's -- take over from the credit-delta
+                    // inference the same way.
+                    if (!real_coin_in_valid) {
+                        ESP_LOGI(TAG, "Meters (LP 0xAF) CONFIRMED WORKING on this machine -- "
+                                      "now authoritative for coin_in (was: credit-delta inference)");
+                    }
+                    real_coin_in_cents = coin_in_cents;
+                    real_coin_in_valid = true;
+                    // coin_in reported to the backend prefers the real LP
+                    // 0x11 meter (below) when confirmed working, else the
+                    // credit-delta inference -- not this Meters value,
+                    // which either never arrives on a given machine (this
+                    // one) or, when it does, would double-count against
+                    // whichever of those two is already running.
                     report_event(SAS_EXC_NO_ACTIVITY, last_credits,
-                                 last_coin_in, last_coin_out, 0, NULL);
+                                 real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                                 last_coin_out, 0, NULL);
                 } else {
                     ESP_LOGW(TAG, "Meters poll: response CRC/parse error (n=%d)", (int)n);
                 }
             }
+        }
+
+        // Total Coin In meter (LP 0x11) -- same ~1s cadence as Meters.
+        // Distinct legacy mechanism, worth trying independently even
+        // though Meters (above) never responds on this machine.
+        static uint8_t coin_in_meter_tick = 0;
+        if (++coin_in_meter_tick >= 25) {  // every 25 cycles (~1s)
+            coin_in_meter_tick = 0;
+
+            size_t ci_len = sas_build_lp_total_coin_in(lp_frame, g_machine_id);
+            sas_send_frame(lp_frame, ci_len);
+            n = sas_receive(resp_buf, sizeof(resp_buf), SAS_LONG_POLL_TIMEOUT);
+            if (n > 0) {
+                SasTotalCoinInResponse ci = sas_parse_total_coin_in(resp_buf, n);
+                if (ci.valid) {
+                    uint32_t new_cents = credits_to_cents(ci.coin_in);
+                    if (!real_coin_in_valid) {
+                        ESP_LOGI(TAG, "Total Coin In meter (LP 0x11) CONFIRMED WORKING on this "
+                                      "machine -- now authoritative for coin_in (was: credit-delta inference)");
+                    }
+                    if (new_cents != real_coin_in_cents) {
+                        ESP_LOGI(TAG, "Total Coin In: %lu ($%.2f)",
+                                 (unsigned long)new_cents, new_cents / 100.0f);
+                    }
+                    real_coin_in_cents = new_cents;
+                    real_coin_in_valid = true;
+                } else {
+                    ESP_LOGW(TAG, "Total Coin In poll (LP 0x11): response CRC/parse error (n=%d)", (int)n);
+                }
+            }
+        }
+
+        // ── 4b. Periodic pending-AFT retry (2026-09-10) ──────────
+        // recover_pending_aft() was previously only called once at boot,
+        // meaning an AFT that failed with a transient/retryable status
+        // (e.g. 0x87 "unable to perform transfers now -- door open, tilt,
+        // disabled, cashout in progress" -- which very much includes "a
+        // game is mid-spin") would just sit in NVS until the NEXT reboot.
+        // For a jackpot payout in particular, there's no operator around
+        // to notice and retry manually, and the win needs to actually
+        // land on the machine's credit meter to count toward the
+        // player's live tournament score. Calling this periodically
+        // (not just at boot) means a payout blocked by a brief, normal
+        // "player is mid-game" condition gets retried automatically
+        // within the same session, typically within ~10s of the game
+        // freeing up -- instead of being silently lost until reboot.
+        // Safe to call repeatedly: it's a no-op whenever NVS has nothing
+        // pending (the overwhelmingly common case).
+        static uint16_t aft_retry_tick = 0;
+        if (++aft_retry_tick >= 250) {  // every 250 cycles (~10s)
+            aft_retry_tick = 0;
+            recover_pending_aft();
         }
 
         // ── 5. Strict 40ms cycle boundary ───────────────────────
