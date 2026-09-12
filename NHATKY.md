@@ -427,3 +427,51 @@
   được dùng ở đâu (dead code) — sửa giá trị cho đúng luôn, phòng dùng sau này.
 
 ---
+
+## 2026-09-12 (Thứ 7)
+
+- Pull nhánh `EVO` lên ngang `origin/main` (fast-forward, không conflict) — 10
+  commit mới. Sau đó chuyển sang nhánh `main`, cũng fast-forward lên
+  `origin/main` (19 commit) — xác nhận `main` là nhánh đang hoạt động chính,
+  đã bắt kịp mọi thay đổi (SAS coin-in, jackpot REAL/VIRTUAL, LED indicator,
+  FLASH_GUIDE, sas_sniffer...).
+- Build `eth01evo` thành công (RAM 6.9%, Flash 50.1%).
+- **Phiên flash firmware dài, nhiều nguyên nhân lỗi khác nhau xen kẽ nhau** —
+  ghi lại đầy đủ để lần sau không mất công đoán lại từ đầu:
+  1. Cổng COM thực tế trên máy là **COM3**, không phải `COM7` ghi trong
+     `platformio.ini` — phải truyền `--upload-port COM3` thủ công mỗi lần.
+  2. **Lỗi môi trường Windows**: tiến trình PlatformIO/esptool bị crash giữa
+     chừng lúc in progress bar (`UnicodeEncodeError`) vì codepage console là
+     `cp1258` (tiếng Việt), không encode được ký tự Unicode esptool in ra —
+     biểu hiện giống "treo lệnh" chứ không báo lỗi rõ ràng. Sửa bằng cách
+     chạy với env `PYTHONIOENCODING=utf-8 PYTHONUTF8=1`.
+  3. Sau khi hết treo, gặp **"The chip stopped responding"** giữa chừng ghi
+     flash — đúng như cảnh báo có sẵn trong `platformio.ini`: JW3510 cấp
+     nguồn qua cách ly không đủ dòng inrush (~400mA) lúc esptool ghi SPI
+     flash. Cấp nguồn trực tiếp USB vào VSYS (bypass JW3510) → flash ổn định
+     trở lại ngay.
+  4. Test tăng `upload_speed` từ 115200 lên **921600** sau khi có nguồn tốt:
+     thành công, ổn định — ghi `firmware.bin` giảm từ 33.7s xuống **8.3s**.
+     Đã sửa `platformio.ini` sang `921600` (kèm comment TEMP TEST). Lưu ý:
+     xem thêm phát hiện 2026-09-13 bên dưới — nguyên nhân "noise" ở baud cao
+     ghi trong comment cũ của file có thể không phải do bản thân baud, mà do
+     jumper điện áp FTDI để sai mức.
+
+---
+
+## 2026-09-13 (Chủ nhật)
+
+- CLAUDE.md được cập nhật, bổ sung phát hiện quan trọng cho đúng loại lỗi
+  ngẫu nhiên gặp hôm 09-12 (`Serial data stream stopped`, `chip stopped
+  responding`, cổng COM tự đổi số): **jumper mức điện áp tín hiệu trên FTDI
+  adapter phải để 3.3V, không phải 5V** (ESP32-C3 là logic 3.3V). Đây nhiều
+  khả năng là nguyên nhân gốc thật sự của các lỗi "ngẫu nhiên, không lặp lại
+  đúng 1 điểm" — ưu tiên kiểm tra jumper này đầu tiên trước khi nghi ngờ
+  nguồn JW3510/baud rate ở lần debug sau.
+- Flash lại 2 lần sau khi board reset, cả hai đều thành công (~21s/lần,
+  921600 baud).
+- Test đổi nguồn cấp cho board sang **power bank** (thay vì USB laptop/JW3510):
+  flash thành công (20.5s) — nguồn power bank ổn định, là lựa chọn thay thế
+  tốt khi cần flash tại hiện trường không có nguồn JW3510/USB đủ dòng.
+
+---
