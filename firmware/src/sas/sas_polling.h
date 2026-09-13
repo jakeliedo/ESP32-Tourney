@@ -44,6 +44,10 @@ typedef struct {
 #define CMD_UNLOCK       3   // Tournament unlock: LP 0x02 Startup
 #define CMD_DISABLE      4   // Full admin disable: LP 0x01 + LP 0x07
 #define CMD_ENABLE       5   // Full admin enable: LP 0x02 + LP 0x06
+#define CMD_ENABLE_BV    6   // Bill validator only: LP 0x06 (no Shutdown/Startup)
+#define CMD_DISABLE_BV   7   // Bill validator only: LP 0x07 (no Shutdown/Startup)
+#define CMD_ENABLE_PRINTER  8  // Re-allow ticket cashout/redemption: LP 0x7B
+#define CMD_DISABLE_PRINTER 9  // Lock down ticket cashout/redemption: LP 0x7B
 
 // ── Shared queues (created in main.cpp, used by both tasks) ──
 extern QueueHandle_t g_command_queue;  // Server → SAS Task

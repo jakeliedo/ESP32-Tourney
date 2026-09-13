@@ -474,4 +474,61 @@
   flash thành công (20.5s) — nguồn power bank ổn định, là lựa chọn thay thế
   tốt khi cần flash tại hiện trường không có nguồn JW3510/USB đủ dòng.
 
+- **Tính năng mới theo yêu cầu người dùng: 4 lệnh Enable/Disable BV + Printer
+  độc lập** (tách khỏi ENABLE/DISABLE toàn phần hiện có):
+  - Firmware: `CMD_ENABLE_BV`/`CMD_DISABLE_BV` (6/7) gửi độc lập LP 0x06/0x07,
+    không kèm Shutdown/Startup. `CMD_ENABLE_PRINTER`/`CMD_DISABLE_PRINTER`
+    (8/9) toggle qua lại 3 bit LP 0x7B (printer-cashout, print-restricted,
+    ticket-redemption) — đổi tên `configure_ticket_lockdown()` (chỉ chạy 1
+    lần lúc boot) thành `set_ticket_printing(bool allow)` dùng chung cho cả
+    boot-lockdown lẫn lệnh runtime mới.
+  - Backend: thêm 4 type vào union `ServerCommand`; không cần đổi
+    `device.controller.ts` vì đã forward mọi type qua MQTT generic sẵn.
+  - Frontend control-panel: thêm 4 nút trong khung riêng "BILL VALIDATOR /
+    PRINTER" (tách biệt khỏi hàng Enable All/Disable All theo yêu cầu), Printer
+    bên trái – BV bên phải trong khung.
+  - Rà soát thêm (không phải bug, chỉ là kiến thức cần nhớ): máy in/vé
+    **tự động bị khoá mỗi lần board boot** (LP 0x7B, đã có từ 2026-09-08) —
+    không tự phục hồi khi rút board. BV **không** tự tắt lúc connect, chỉ tự
+    tắt/bật theo `tournament.service.ts` lúc start/end/cancel (kèm trong
+    ENABLE/DISABLE toàn phần) — độc lập với 2 nút BV mới.
+
+- **Dọn UI control-panel**: phát hiện ô "JP Initial Value" là dead code (state
+  `jpInitial` không được đọc ở bất kỳ đâu, chỉ có giá trị mặc định '1000' vô
+  dụng — cấu hình jackpot thật dùng `jpFloor`/`jpCeiling`/`jpNumHits`/`jpRate`/
+  `vjpTick` hoàn toàn khác). Đã xoá field này + chuyển khối "Jackpot Engine"
+  lên ngay sau hàng Start Credit/Time/Rounds (trên Session Name) theo yêu cầu
+  "mang jackpot lên". Đổi mặc định "Time per Round" từ 00:10 → **02:00**.
+
+- **Jackpot Hit video overlay (leaderboard)** — theo yêu cầu tăng kích thước +
+  overlay số máy/số tiền ngay trên nền video thay vì xếp bên dưới:
+  - Panel rộng 42% → 62% canvas width. Tên máy + số tiền chuyển vào 1 lớp
+    `position:absolute` phía dưới video, có scrim gradient tối để đọc được
+    trên mọi nền video.
+  - Bug tự phát hiện qua test thật: `lineHeight:0` đặt trên wrapper video
+    (để loại bỏ khoảng trắng dưới `<video>` inline) bị **kế thừa xuống 2 div
+    overlay**, bóp chúng chồng lên nhau. Sửa: bỏ hẳn `lineHeight:0` (đã có
+    `display:'block'` trên `<video>` là đủ), reset `lineHeight:'normal'` trên
+    div scrim cho chắc.
+  - Bug caching video: file upload luôn ghi đè cùng tên `jackpot-video.<ext>`
+    → URL không đổi giữa các lần chọn video mới → React/browser không nhận ra
+    file đã đổi, phát lại clip cũ kể cả sau F5. Sửa: gắn `?v=<timestamp>` vào
+    URL lúc lưu Redis (`jackpot.controller.ts` `uploadVideo()`), tự động lan
+    ra mọi chỗ đọc lại URL này (get + broadcast mỗi lần jackpot rớt) mà không
+    cần sửa thêm nơi khác. Thêm `video.load()` trước `.play()` cho chắc.
+  - Thêm hiệu ứng **"uốn lượn tại chỗ"** cho tên máy + số tiền (component
+    `WavyText`): tách chuỗi thành từng ký tự, mỗi ký tự 1 `<span>` với
+    `animation: jpWave` (`translateY(-0.18em)`, biên độ tính theo `em` nên tự
+    scale theo cỡ chữ) và `animationDelay` lệch dần theo index → tạo hiệu ứng
+    sóng chạy dọc chữ, áp dụng cả 2 chế độ (có video / không video).
+
+- **Hạ tầng test jackpot không cần phần cứng thật**: `sim_esp32.py` lỗi
+  `AttributeError: module 'paho.mqtt.client' has no attribute
+  'CallbackAPIVersion'` vì máy đang cài `paho-mqtt` 1.6.1 cũ — script cần
+  API v2. Đã `pip install --upgrade paho-mqtt` → 2.1.0, chạy OK. Docker
+  Desktop cũng chưa chạy sẵn lúc khởi động backend — phải tự mở app trước
+  khi `docker-compose` containers (postgres/redis/mosquitto) available (3
+  container này có restart policy nên tự lên lại sau khi Docker Desktop mở,
+  không cần `docker-compose up` lại thủ công).
+
 ---

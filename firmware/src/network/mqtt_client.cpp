@@ -58,6 +58,10 @@ static void on_message(char* topic, uint8_t* payload, unsigned int length) {
     else if (strcmp(type, "UNLOCK")       == 0) cmd.cmd_type = CMD_UNLOCK;
     else if (strcmp(type, "DISABLE")      == 0) cmd.cmd_type = CMD_DISABLE;
     else if (strcmp(type, "ENABLE")       == 0) cmd.cmd_type = CMD_ENABLE;
+    else if (strcmp(type, "ENABLE_BV")    == 0) cmd.cmd_type = CMD_ENABLE_BV;
+    else if (strcmp(type, "DISABLE_BV")   == 0) cmd.cmd_type = CMD_DISABLE_BV;
+    else if (strcmp(type, "ENABLE_PRINTER")  == 0) cmd.cmd_type = CMD_ENABLE_PRINTER;
+    else if (strcmp(type, "DISABLE_PRINTER") == 0) cmd.cmd_type = CMD_DISABLE_PRINTER;
     else {
         ESP_LOGW(TAG, "Unknown command type: %s", type);
         return;

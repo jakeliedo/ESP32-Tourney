@@ -27,7 +27,8 @@ interface TelemetryPayload {
 }
 
 interface ServerCommand {
-  type: 'AFT_PUMP' | 'AFT_WITHDRAW' | 'LOCK' | 'UNLOCK' | 'DISABLE' | 'ENABLE';
+  type: 'AFT_PUMP' | 'AFT_WITHDRAW' | 'LOCK' | 'UNLOCK' | 'DISABLE' | 'ENABLE'
+      | 'ENABLE_BV' | 'DISABLE_BV' | 'ENABLE_PRINTER' | 'DISABLE_PRINTER';
   amount?: number;
   txn_id?: string;
 }

@@ -797,16 +797,16 @@ static uint32_t credits_to_cents(uint32_t raw_credits) {
  * loses power or disconnects. Re-enabling ticket cashout (e.g. to return
  * the machine to standalone operation) requires another LP 0x7B (or an
  * operator menu option, if the machine provides one) setting those bits
- * back to 1.
+ * back to 1 -- see set_ticket_printing(true), wired to CMD_ENABLE_PRINTER.
  */
-static bool configure_ticket_lockdown() {
+static bool set_ticket_printing(bool allow) {
     uint8_t frame[13];
     uint8_t resp[24];
 
     const uint16_t control_mask = VALIDATION_BIT_PRINTER_CASHOUT
                                  | VALIDATION_BIT_PRINT_RESTRICTED
                                  | VALIDATION_BIT_TICKET_REDEMPTION;
-    const uint16_t status_bits  = 0x0000;  // disallow all three controlled bits
+    const uint16_t status_bits  = allow ? control_mask : 0x0000;
 
     size_t frame_len = sas_build_lp_validation_status(frame, g_machine_id,
                                                        control_mask, status_bits, 0, 0);
@@ -814,19 +814,19 @@ static bool configure_ticket_lockdown() {
     size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
 
     if (n == 0) {
-        ESP_LOGW(TAG, "Ticket lockdown: no response from machine");
+        ESP_LOGW(TAG, "Ticket %s: no response from machine", allow ? "unlock" : "lockdown");
         return false;
     }
 
     SasValidationStatusResponse st = sas_parse_validation_status(resp, n);
     if (!st.valid) {
-        ESP_LOGW(TAG, "Ticket lockdown: response CRC/parse error (n=%d)", (int)n);
+        ESP_LOGW(TAG, "Ticket %s: response CRC/parse error (n=%d)", allow ? "unlock" : "lockdown", (int)n);
         return false;
     }
 
-    ESP_LOGI(TAG, "Ticket lockdown: applied (status_bits=0x%04X) -- "
+    ESP_LOGI(TAG, "Ticket %s: applied (status_bits=0x%04X) -- "
                   "printer-cashout=%d  restricted-tickets=%d  ticket-redemption=%d",
-             st.status_bits,
+             allow ? "unlock" : "lockdown", st.status_bits,
              (st.status_bits & VALIDATION_BIT_PRINTER_CASHOUT)   ? 1 : 0,
              (st.status_bits & VALIDATION_BIT_PRINT_RESTRICTED)  ? 1 : 0,
              (st.status_bits & VALIDATION_BIT_TICKET_REDEMPTION) ? 1 : 0);
@@ -954,10 +954,10 @@ void sas_polling_task(void* pvParameters) {
     for (int attempt = 0; attempt < 3 && !s_denom_known; attempt++) {
         query_machine_denom();
     }
-    // Lock down ticket cashout/redemption -- see configure_ticket_lockdown()
-    // for why. A few retries for the same reason as the queries above.
+    // Lock down ticket cashout/redemption -- see set_ticket_printing() for
+    // why. A few retries for the same reason as the queries above.
     for (int attempt = 0; attempt < 3; attempt++) {
-        if (configure_ticket_lockdown()) break;
+        if (set_ticket_printing(false)) break;
     }
 
     // Check for pending transaction from previous power cycle
@@ -1020,6 +1020,24 @@ void sas_polling_task(void* pvParameters) {
                     execute_simple_command(SAS_CMD_ENABLE_BILL);
                     s_state = SLOT_STATE_IDLE;
                     ESP_LOGI(TAG, "ENABLE: LP 0x02 + LP 0x06 sent");
+                    break;
+                case CMD_ENABLE_BV:
+                    execute_simple_command(SAS_CMD_ENABLE_BILL);
+                    ESP_LOGI(TAG, "ENABLE_BV: LP 0x06 sent");
+                    break;
+                case CMD_DISABLE_BV:
+                    execute_simple_command(SAS_CMD_DISABLE_BILL);
+                    ESP_LOGI(TAG, "DISABLE_BV: LP 0x07 sent");
+                    break;
+                case CMD_ENABLE_PRINTER:
+                    for (int attempt = 0; attempt < 3; attempt++) {
+                        if (set_ticket_printing(true)) break;
+                    }
+                    break;
+                case CMD_DISABLE_PRINTER:
+                    for (int attempt = 0; attempt < 3; attempt++) {
+                        if (set_ticket_printing(false)) break;
+                    }
                     break;
                 default:
                     ESP_LOGW(TAG, "Unknown command type: %d", cmd.cmd_type);

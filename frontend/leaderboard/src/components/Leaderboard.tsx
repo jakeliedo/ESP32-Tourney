@@ -144,8 +144,35 @@ if (!document.getElementById(STYLE_ID)) {
       0%,100% { opacity: .85; }
       50%      { opacity: 1; }
     }
+    @keyframes jpWave {
+      0%,100% { transform: translateY(0); }
+      50%      { transform: translateY(-0.18em); }
+    }
   `;
   document.head.appendChild(el);
+}
+
+// Renders text as one <span> per character, each bobbing up/down on
+// jpWave with a staggered delay, so the whole string undulates in place
+// (visual style requested for the jackpot machine/amount overlay).
+function WavyText({ text, delayStep = 0.07 }: { text: string; delayStep?: number }) {
+  return (
+    <>
+      {[...text].map((ch, i) => (
+        <span
+          key={i}
+          style={{
+            display: 'inline-block',
+            whiteSpace: 'pre',
+            animation: 'jpWave 1.2s ease-in-out infinite',
+            animationDelay: `${i * delayStep}s`,
+          }}
+        >
+          {ch}
+        </span>
+      ))}
+    </>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,7 +371,8 @@ export default function Leaderboard() {
   useEffect(() => {
     if (jackpot && jackpotVideoRef.current) {
       const v = jackpotVideoRef.current;
-      v.currentTime = 0;
+      v.load();          // force-reload in case src changed but the
+      v.currentTime = 0; // element didn't reset its playback position
       v.muted = false;
       v.play().catch(() => {
         v.muted = true;
@@ -654,29 +682,13 @@ export default function Leaderboard() {
             border: '1px solid rgba(200,168,75,0.4)',
             borderRadius: 12,
             padding: jackpotVideoUrl
-              ? `${pxw(2)}px ${pxw(3)}px ${pxw(3)}px`
+              ? `${pxw(2)}px ${pxw(2)}px ${pxw(2.5)}px`
               : `${pxw(4)}px ${pxw(6)}px`,
             textAlign: 'center',
             background: 'radial-gradient(ellipse at center, #1a0f00 0%, #08060a 70%)',
             animation: 'jpGlow 1.6s ease-in-out infinite',
-            width: jackpotVideoUrl ? `${pxw(42)}px` : undefined,
+            width: jackpotVideoUrl ? `${pxw(62)}px` : undefined,
           }}>
-            {jackpotVideoUrl && (
-              <video
-                ref={jackpotVideoRef}
-                src={jackpotVideoUrl}
-                onEnded={handleJackpotVideoEnded}
-                muted={false}
-                playsInline
-                style={{
-                  width: '100%',
-                  borderRadius: 8,
-                  marginBottom: `${pxw(1.5)}px`,
-                  display: 'block',
-                  background: '#000',
-                }}
-              />
-            )}
             <div style={{
               fontSize: `${pxw(0.9)}px`, fontWeight: 700, letterSpacing: '0.28em',
               color: '#c8a84b', marginBottom: `${pxw(1.5)}px`,
@@ -684,20 +696,69 @@ export default function Leaderboard() {
             }}>
               MYSTERY JACKPOT HIT
             </div>
-            <div style={{
-              fontFamily: 'Georgia, serif', fontSize: `${pxw(3.5)}px`,
-              color: '#fffbe8', marginBottom: `${pxw(1)}px`, letterSpacing: '0.08em',
-              textShadow: `0 0 ${pxw(2)}px rgba(200,168,75,0.4)`,
-            }}>
-              {name(jackpot.machineId)}
-            </div>
-            <div style={{
-              fontFamily: 'Georgia, serif', fontSize: `${pxw(5.5)}px`, fontWeight: 700,
-              color: '#FFD060', fontVariantNumeric: 'tabular-nums',
-              textShadow: `0 0 ${pxw(3)}px rgba(255,208,96,0.5)`, marginBottom: `${pxw(1.5)}px`,
-            }}>
-              ${(jackpot.amount / 100).toLocaleString('en', { minimumFractionDigits: 2 })}
-            </div>
+
+            {jackpotVideoUrl && (
+              <div style={{
+                position: 'relative', width: '100%',
+                marginBottom: `${pxw(1.5)}px`,
+                borderRadius: 8, overflow: 'hidden',
+              }}>
+                <video
+                  ref={jackpotVideoRef}
+                  src={jackpotVideoUrl}
+                  onEnded={handleJackpotVideoEnded}
+                  muted={false}
+                  playsInline
+                  style={{
+                    width: '100%',
+                    display: 'block',
+                    background: '#000',
+                  }}
+                />
+                {/* Scrim + machine/amount overlaid directly on the video */}
+                <div style={{
+                  position: 'absolute', left: 0, right: 0, bottom: 0,
+                  padding: `${pxw(3)}px ${pxw(2)}px ${pxw(1.5)}px`,
+                  background: 'linear-gradient(to top, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0) 100%)',
+                  pointerEvents: 'none', lineHeight: 'normal',
+                }}>
+                  <div style={{
+                    fontFamily: 'Georgia, serif', fontSize: `${pxw(2.6)}px`,
+                    color: '#fffbe8', marginBottom: `${pxw(0.6)}px`, letterSpacing: '0.08em',
+                    textShadow: `0 2px 10px rgba(0,0,0,0.9), 0 0 ${pxw(2)}px rgba(200,168,75,0.5)`,
+                  }}>
+                    <WavyText text={name(jackpot.machineId)} />
+                  </div>
+                  <div style={{
+                    fontFamily: 'Georgia, serif', fontSize: `${pxw(4.2)}px`, fontWeight: 700,
+                    color: '#FFD060', fontVariantNumeric: 'tabular-nums',
+                    textShadow: `0 2px 12px rgba(0,0,0,0.9), 0 0 ${pxw(3)}px rgba(255,208,96,0.6)`,
+                  }}>
+                    <WavyText text={`$${(jackpot.amount / 100).toLocaleString('en', { minimumFractionDigits: 2 })}`} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!jackpotVideoUrl && (
+              <>
+                <div style={{
+                  fontFamily: 'Georgia, serif', fontSize: `${pxw(3.5)}px`,
+                  color: '#fffbe8', marginBottom: `${pxw(1)}px`, letterSpacing: '0.08em',
+                  textShadow: `0 0 ${pxw(2)}px rgba(200,168,75,0.4)`,
+                }}>
+                  <WavyText text={name(jackpot.machineId)} />
+                </div>
+                <div style={{
+                  fontFamily: 'Georgia, serif', fontSize: `${pxw(5.5)}px`, fontWeight: 700,
+                  color: '#FFD060', fontVariantNumeric: 'tabular-nums',
+                  textShadow: `0 0 ${pxw(3)}px rgba(255,208,96,0.5)`, marginBottom: `${pxw(1.5)}px`,
+                }}>
+                  <WavyText text={`$${(jackpot.amount / 100).toLocaleString('en', { minimumFractionDigits: 2 })}`} />
+                </div>
+              </>
+            )}
+
             <div style={{
               fontSize: `${pxw(0.75)}px`, letterSpacing: '0.35em',
               color: 'rgba(200,168,75,0.45)',

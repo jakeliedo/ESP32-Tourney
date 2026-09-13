@@ -29,7 +29,6 @@ interface Settings {
   timeMM: string;
   timeSS: string;
   rounds: string;
-  jpInitial: string;
 }
 
 function parseTotalSeconds(mm: string, ss: string): number {
@@ -38,7 +37,7 @@ function parseTotalSeconds(mm: string, ss: string): number {
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>({
-    startCredit: '100', timeMM: '00', timeSS: '10', rounds: '', jpInitial: '1000',
+    startCredit: '100', timeMM: '02', timeSS: '00', rounds: '',
   });
   const [machines, setMachines]        = useState<Machine[]>([]);
   const [enabledSet, setEnabledSet]    = useState<Set<string>>(new Set());
@@ -198,6 +197,15 @@ export default function App() {
     machines.filter(m => m.status.toLowerCase() !== 'offline')
       .forEach(m => sendMachineCommand(m.machine_id, { type: 'DISABLE' }).catch(() => {}));
   };
+
+  const sendAll = (type: string) => {
+    machines.filter(m => m.status.toLowerCase() !== 'offline')
+      .forEach(m => sendMachineCommand(m.machine_id, { type }).catch(() => {}));
+  };
+  const enableBvAll = () => sendAll('ENABLE_BV');
+  const disableBvAll = () => sendAll('DISABLE_BV');
+  const enablePrinterAll = () => sendAll('ENABLE_PRINTER');
+  const disablePrinterAll = () => sendAll('DISABLE_PRINTER');
 
   const toggleEnable = (id: string) => {
     setEnabledSet(prev => {
@@ -465,29 +473,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* JP Initial */}
-          <div style={s.fieldWrap}>
-            <label style={s.fieldLabel}>JP Initial Value</label>
-            <div style={s.fieldRow}>
-              <span style={s.fieldUnit}>$</span>
-              <input type="number" value={settings.jpInitial}
-                onChange={setSetting('jpInitial')} min="0" />
-            </div>
-          </div>
-
-        </div>
-
-        {/* Session Name */}
-        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <label style={{ ...s.fieldLabel, flexShrink: 0 }}>Session Name</label>
-          <input
-            type="text"
-            value={sessionName}
-            onChange={e => setSessionName(e.target.value)}
-            placeholder={new Date().toLocaleDateString('en-GB')}
-            disabled={!!sessionIdRef.current}
-            style={{ flex: 1, opacity: sessionIdRef.current ? 0.4 : 1 }}
-          />
         </div>
 
         {/* Jackpot Engine */}
@@ -605,19 +590,51 @@ export default function App() {
             </div>
           )}
         </div>
+
+        {/* Session Name */}
+        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <label style={{ ...s.fieldLabel, flexShrink: 0 }}>Session Name</label>
+          <input
+            type="text"
+            value={sessionName}
+            onChange={e => setSessionName(e.target.value)}
+            placeholder={new Date().toLocaleDateString('en-GB')}
+            disabled={!!sessionIdRef.current}
+            style={{ flex: 1, opacity: sessionIdRef.current ? 0.4 : 1 }}
+          />
+        </div>
       </div>
 
       {/* ── C. Controls ──────────────────────────────────────── */}
       <div style={s.section}>
         <div className="section-label">Controls</div>
 
-        <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
           <button className="btn-neutral" onClick={loadMachines}>Refresh</button>
           <button className="btn-neutral" onClick={enableAll}>Enable All</button>
           <button className="btn-neutral" onClick={disableAll}>Disable All</button>
           <div style={{ flex: 1 }} />
           <button className="btn-gold" disabled={busy} onClick={handleAftIn}>AFT IN</button>
           <button className="btn-danger" disabled={busy} onClick={handleAftOut}>AFT OUT</button>
+        </div>
+
+        <div style={{
+          border: '1px solid var(--border-2)', borderRadius: 6,
+          padding: '8px 10px 10px', marginBottom: 8,
+        }}>
+          <div style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: '.18em',
+            color: 'var(--text-3)', textTransform: 'uppercase', marginBottom: 8,
+          }}>
+            Bill Validator / Printer
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button className="btn-neutral" onClick={enablePrinterAll}>Enable Printer</button>
+            <button className="btn-neutral" onClick={disablePrinterAll}>Disable Printer</button>
+            <div style={{ flex: 1 }} />
+            <button className="btn-neutral" onClick={enableBvAll}>Enable BV</button>
+            <button className="btn-neutral" onClick={disableBvAll}>Disable BV</button>
+          </div>
         </div>
 
         {/* Round indicator */}
@@ -972,7 +989,7 @@ const s: Record<string, React.CSSProperties> = {
     background: 'var(--surface)', flexShrink: 0,
   },
   settingsGrid: {
-    display: 'grid', gridTemplateColumns: '1fr 1.4fr 1fr 1fr', gap: 10,
+    display: 'grid', gridTemplateColumns: '1fr 1.4fr 1fr', gap: 10,
   },
   fieldWrap: { display: 'flex', flexDirection: 'column', gap: 4 },
   fieldLabel: { fontSize: 10, color: 'var(--text-2)', letterSpacing: '.06em' },

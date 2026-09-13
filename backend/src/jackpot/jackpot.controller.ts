@@ -128,7 +128,13 @@ export class JackpotController {
   }))
   async uploadVideo(@UploadedFile() file: Express.Multer.File) {
     if (!file) return { ok: false, error: 'No file received' };
-    const url = `/uploads/${file.filename}`;
+    // Filename on disk is fixed (jackpot-video.<ext>, overwritten each
+    // upload), so a new upload with the same extension would otherwise
+    // produce the exact same URL string -- React/the browser then never
+    // notice the file changed and keep playing the previously-loaded
+    // video. Cache-bust with a version query param so every upload gets
+    // a distinct URL.
+    const url = `/uploads/${file.filename}?v=${Date.now()}`;
     await this.redis.set('vjp:video_url',  url);
     await this.redis.set('vjp:video_name', file.originalname);
     return { ok: true, url, name: file.originalname };
