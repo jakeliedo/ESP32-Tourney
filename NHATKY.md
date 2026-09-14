@@ -798,4 +798,48 @@
     ảnh: `lineHeight:0` trên wrapper video kế thừa xuống làm chữ tên máy/số
     tiền jackpot chồng lên nhau — xem thêm mục video jackpot hôm 09-13).
 
+- **Cập nhật tiếp saga máy `tech4` ở mục trên trong ngày — đã tìm ra nguyên
+  nhân gốc thật, KHÁC HẲN kết luận trước đó ("USB stack/latency đặc thù,
+  chưa xác định được, ưu tiên dùng máy khác nếu gặp lại").** Nguyên nhân
+  thật không liên quan gì tới boot mode, dây nối, hay bản thân baud rate.
+  - **Nguyên nhân đã chứng minh bằng traceback thật**: PlatformIO/Python
+    trên máy `tech4` **crash giữa chừng lúc đang ghi flash** với
+    `UnicodeEncodeError: 'charmap' codec can't encode characters...` —
+    console Windows dùng bảng mã `cp1252` cũ, không encode được ký tự
+    Unicode (`░`/`█`) trong progress bar mà esptool 5.3.0 in ra. Log xác
+    nhận: quá trình **đã kết nối, nhận diện chip, upload stub flasher, bắt
+    đầu ghi `bootloader.bin` thành công** trước khi tiến trình Python phía
+    PC chết đột ngột — board không hề mất kết nối, PC làm rớt kết nối. Dấu
+    hiệu vật lý: đèn TX/RX FTDI cùng chớp (giao tiếp 2 chiều thật) rồi đột
+    ngột còn 1 đèn (PC ngừng gửi vì đã crash) — đúng như quan sát ban đầu
+    tưởng nhầm là "board rời boot mode".
+  - **Loại trừ dứt điểm nghi ngờ boot mode/jumper**: đọc trực tiếp UART0
+    bằng PowerShell (`System.IO.Ports.SerialPort` — máy `tech4` hoá ra
+    hoàn toàn không có PowerShell nào, kể cả 5.1 lẫn 7, phải cài PowerShell
+    7 bằng tay từ bản zip portable GitHub vì bản .msi chính thức bị chặn:
+    máy tự báo Windows 8.1/build 9600 cho Windows Installer dù thực tế
+    Windows 10 — nghi ngờ app-compat shim cũ còn sót lại) ngay lúc board
+    vừa vào boot mode, thấy đúng banner ROM `rst:0x1
+    (POWERON),boot:0x5 (DOWNLOAD(USB/UART0/1))` + `waiting for download` —
+    chứng minh board vào đúng download mode kể cả những lần upload báo
+    "No serial data received" ngay sau đó (ROM không tự timeout).
+  - **Fix áp dụng**: (1) `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1` set
+    machine-wide (`setx ... /M`) — fix chắc chắn 100% cho crash encoding,
+    bằng chứng trực tiếp từ traceback; (2) FTDI latency timer 16ms→1ms
+    trong registry cho mọi instance ID của adapter (cần rút/cắm lại FTDI để
+    driver áp dụng); (3) `--connect-attempts=40` thêm vào `upload_flags`
+    (mặc định chỉ 7 lần ~24s); (4) script `firmware/flash.ps1` tự động
+    retry. (2) và (3) đổi cùng lúc lúc xác nhận lại ổn định nên **không
+    tách bạch được cái nào thực sự cần thiết** — chỉ (1) chắc chắn 100%.
+  - **Baud rate 921600 phục hồi lại thành công** sau khi fix đúng gốc rễ —
+    test 6/6 lần flash liên tiếp thành công ngay lần đầu (bao gồm cả sau
+    khi đổi cổng COM7→COM9 do cắm lại FTDI), ~28s/lần (~8.5s riêng phần ghi
+    `firmware.bin` 689KB). Xác nhận rằng kết luận buổi debug trước đó
+    ("baud thấp cải thiện tỷ lệ thành công nhưng không phải fix triệt để")
+    là **đúng một phần nhưng sai hướng nguyên nhân** — baud rate không phải
+    biến số quyết định, chỉ tình cờ che bớt triệu chứng của lỗi encoding.
+  - Đã ghi đầy đủ vào `CLAUDE.md` (mục "Nhật ký debug Upload/Flash không ổn
+    định (2026-09-14)") để session Claude Code khác tự động nắm được, không
+    cần giải thích lại từ đầu.
+
 ---

@@ -78,6 +78,7 @@ React Frontends
 ESP32-Tourney/
 ├── firmware/
 │   ├── platformio.ini          # env: eth01evo (main), led-test (smoke test), native (unit tests)
+│   ├── flash.ps1                # Upload tự động retry — xem "Nhật ký debug Upload/Flash" (2026-09-14)
 │   ├── include/config.h        # TẤT CẢ pin DM9051, baud, IP, topic MQTT → chỉnh tại đây
 │   ├── test_led/
 │   │   └── main.cpp            # LED smoke test: GPIO5 RED + GPIO2 GREEN fade sine
@@ -167,6 +168,10 @@ pio run -e eth01evo
 
 # Build + flash (board phải ở boot mode trước — xem bên dưới)
 pio run -e eth01evo --target upload
+
+# Hoặc: upload tự động retry cho tới khi thành công (xem "Nhật ký debug
+# Upload/Flash không ổn định (2026-09-14)" bên dưới để biết lý do cần cái này)
+./flash.ps1
 
 # Serial monitor
 pio device monitor -e eth01evo   # 115200 baud, cổng COM thật của FTDI (đã dùng COM7 khi debug SAS 2026-09; đổi theo máy, xem Device Manager)
@@ -497,6 +502,50 @@ Narrative debug đầy đủ (log thật, số liệu, thứ tự đã thử) n�
 **Máy DISABLED (CMD_DISABLE) không được nhận AFT_WITHDRAW** — chặn ở firmware (`s_state == SLOT_STATE_DISABLED`, có thẩm quyền thật) và backend (check DB status trước khi gửi MQTT, phản hồi nhanh hơn).
 
 **Quy ước tiền/cent trong toàn bộ stack: luôn `Math.round()`, không bao giờ `Math.floor()`/`parseInt()`/truncate** khi chuyển đổi dollar↔cents hoặc khi có phép nhân/chia float — `parseInt("50.75")` cắt cụt thành `50` (mất cent), và `Math.floor()` trên một pool tích lũy theo % (virtual jackpot) luôn trả THIẾU tiền một cách hệ thống. Xem `App.tsx` (buy-in/aft-in), `device.controller.ts`, `virtual-jackpot.service.ts` cho pattern đúng.
+
+---
+
+## Nhật ký debug Upload/Flash không ổn định (2026-09-14)
+
+Phiên làm việc 2026-09-14 trên một máy dev cụ thể (máy `TECH4`): `pio run -e eth01evo --target upload` fail liên tục, nhiều kiểu lỗi khác nhau qua từng lần thử (im lặng hoàn toàn "No serial data received", "Access is denied" trên COM7, crash giữa chừng lúc đang ghi flash...). Ban đầu nghi ngờ boot mode/jumper sai — **sai hướng**, tốn thời gian. Ghi lại đầy đủ vì nguyên nhân thật rất phản trực giác (lỗi ở PC, không phải board/dây/baud).
+
+### Nguyên nhân đã chứng minh (từ traceback thật, không phải suy đoán)
+
+PlatformIO/Python trên máy này **crash giữa chừng** khi đang ghi flash, với `UnicodeEncodeError: 'charmap' codec can't encode characters...` — console đang dùng bảng mã Windows cp1252 cũ, không encode được ký tự Unicode trong progress bar mà esptool 5.3.0 in ra (`░`/`█`). Log cho thấy quá trình flash **thực sự đã kết nối, nhận diện chip, upload stub flasher, bắt đầu ghi bootloader.bin thành công** trước khi tiến trình Python phía PC chết đột ngột — board không hề mất kết nối, PC làm rớt kết nối. Dấu hiệu vật lý quan sát được: đèn TX/RX trên FTDI cùng chớp (giao tiếp 2 chiều thật) rồi đột ngột chỉ còn 1 đèn (PC ngừng gửi vì đã crash).
+
+### Đã loại trừ (kiểm chứng bằng thực nghiệm, KHÔNG phải nguyên nhân)
+
+- **Boot mode/jumper sai** — loại trừ bằng cách đọc trực tiếp UART0 lúc board mới vào boot mode (dùng PowerShell `System.IO.Ports.SerialPort`, xem cách làm bên dưới), thấy đúng banner ROM: `rst:0x1 (POWERON),boot:0x5 (DOWNLOAD(USB/UART0/1))` + `waiting for download` — chứng minh board vào đúng download mode, kể cả những lần upload báo "No serial data received" ngay sau đó.
+- **Baud rate 921600** — từng bị hạ xuống 115200 làm "local override cho máy này" (xem comment cũ trong `platformio.ini`), nhưng sau khi sửa đúng nguyên nhân thật, test lại 921600 chạy ổn định 5/5 lần liên tiếp, ~28s/lần (so với ~35s riêng phần ghi `firmware.bin` ở 115200). Kết luận: chẩn đoán "921600 fail trên máy này" trước đó là **sai lầm** — chỉ là hệ quả của lỗi encoding + esptool sync flaky, không phải giới hạn thật của baud rate.
+- **Cờ reset DTR/RTS** (`--before=no-reset --after=no-reset`) — đã đúng từ trước (fix ngày 2026-09-05), không phải nguyên nhân lần này.
+
+### Các fix đã áp dụng (2026-09-14)
+
+1. **`PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1`** — set machine-wide (`setx ... /M`), giải quyết dứt điểm crash encoding. Đây là fix duy nhất được chứng minh chắc chắn cần thiết (từ traceback).
+2. **FTDI latency timer 16ms → 1ms** — sửa registry `HKLM\SYSTEM\CurrentControlSet\Enum\FTDIBUS\...\Device Parameters\LatencyTimer` cho tất cả instance ID của adapter này (mỗi lần cắm vào cổng USB khác nhau tạo instance ID mới, phải sửa hết). **Cần rút/cắm lại FTDI (hoặc Disable/Enable trong Device Manager) để driver áp dụng giá trị mới** — chỉ sửa registry không đủ.
+3. **`--connect-attempts=40`** thêm vào `upload_flags` (cả env `eth01evo` và `led-test`) — mặc định esptool chỉ thử sync 7 lần (~24s) rồi bỏ cuộc; ROM không tự timeout khi đứng chờ download mode nên tăng số lần thử là an toàn, giúp 1 lệnh `pio run --target upload` tự "chờ" qua được các lần esptool sync flaky mà không cần người dùng can thiệp.
+4. **`firmware/flash.ps1`** — script PowerShell tự động lặp lại toàn bộ lệnh upload (mặc định tối đa 5 lần), tự dọn process `pio`/`python` treo cổng COM giữa các lần, chỉ dừng hỏi người dùng khi thực sự cần làm lại jumper. Dùng: `cd firmware; ./flash.ps1`.
+5. `upload_speed` trả về **`921600`** (giá trị khuyến nghị lâu dài của project, xem comment 2026-09-12/13 trong `platformio.ini`).
+
+**Lưu ý trung thực:** mục 2 và 3 được áp dụng cùng lúc với việc xác nhận ổn định trở lại, nên **không tách bạch được chính xác cái nào thực sự cần thiết** — chỉ có mục 1 (encoding) là chắc chắn 100% nhờ traceback. Nếu máy khác gặp lại tình trạng tương tự, ưu tiên thử fix encoding trước (rẻ, không rủi ro), rồi mới tới latency timer.
+
+### Cách chẩn đoán "board có thực sự vào boot mode không" mà không cần đoán
+
+Khi nghi ngờ upload fail là do boot mode sai, đọc thẳng UART0 thay vì đoán qua log esptool:
+
+```powershell
+$port = New-Object System.IO.Ports.SerialPort COM7,115200,None,8,One
+$port.Open()
+Start-Sleep -Seconds 20   # trong lúc này: làm 3 bước jumper vào boot mode
+$port.ReadExisting()      # nếu thấy "waiting for download" -> board ĐÃ vào đúng boot mode
+$port.Close()
+```
+
+Nếu thấy banner ROM này mà `pio run --target upload` vẫn báo "No serial data received", **không cần làm lại jumper** — cứ chạy lại lệnh upload ngay, board vẫn đang chờ (ROM không tự timeout).
+
+### Kết quả
+
+5/5 lần upload liên tiếp thành công ngay lần thử đầu tiên sau khi áp dụng đủ 5 fix trên, ~28s/lần ở 921600 baud (~8.5s riêng phần ghi `firmware.bin` 689KB).
 
 ---
 
