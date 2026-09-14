@@ -498,6 +498,21 @@ export default function App() {
             </div>
           </div>
 
+          {/* Session Name */}
+          <div style={s.fieldWrap}>
+            <label style={s.fieldLabel}>Session Name</label>
+            <div style={s.fieldRow}>
+              <input
+                type="text"
+                value={sessionName}
+                onChange={e => setSessionName(e.target.value)}
+                placeholder={new Date().toLocaleDateString('en-GB')}
+                disabled={!!sessionIdRef.current}
+                style={{ flex: 1, opacity: sessionIdRef.current ? 0.4 : 1 }}
+              />
+            </div>
+          </div>
+
         </div>
 
         {/* Jackpot Engine */}
@@ -616,50 +631,82 @@ export default function App() {
           )}
         </div>
 
-        {/* Session Name */}
-        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <label style={{ ...s.fieldLabel, flexShrink: 0 }}>Session Name</label>
-          <input
-            type="text"
-            value={sessionName}
-            onChange={e => setSessionName(e.target.value)}
-            placeholder={new Date().toLocaleDateString('en-GB')}
-            disabled={!!sessionIdRef.current}
-            style={{ flex: 1, opacity: sessionIdRef.current ? 0.4 : 1 }}
-          />
-        </div>
       </div>
 
       {/* ── C. Controls ──────────────────────────────────────── */}
       <div style={s.section}>
         <div className="section-label">Controls</div>
 
-        <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <button className="btn-neutral" onClick={loadMachines}>Refresh</button>
-          <button className="btn-neutral" onClick={enableAll}>Enable All</button>
-          <button className="btn-neutral" onClick={disableAll}>Disable All</button>
-          <div style={{ flex: 1 }} />
-          <button className="btn-gold" disabled={busy} onClick={handleAftIn}>AFT IN</button>
-          <button className="btn-danger" disabled={busy} onClick={handleAftOut}>AFT OUT</button>
-        </div>
 
-        <div style={{
-          border: '1px solid var(--border-2)', borderRadius: 6,
-          padding: '8px 10px 10px', marginBottom: 8,
-        }}>
-          <div style={{
-            fontSize: 9, fontWeight: 700, letterSpacing: '.18em',
-            color: 'var(--text-3)', textTransform: 'uppercase', marginBottom: 8,
-          }}>
-            Bill Validator / Printer
+          <div style={{ ...s.btnGroup, borderColor: 'rgba(91,184,255,.35)' }}>
+            <button className="btn-blue" onClick={enableAll}>Enable All</button>
+            <button className="btn-blue" onClick={disableAll}>Disable All</button>
           </div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            <button className="btn-neutral" onClick={enablePrinterAll}>Enable Printer</button>
-            <button className="btn-neutral" onClick={disablePrinterAll}>Disable Printer</button>
-            <div style={{ flex: 1 }} />
-            <button className="btn-neutral" onClick={enableBvAll}>Enable BV</button>
-            <button className="btn-neutral" onClick={disableBvAll}>Disable BV</button>
+
+          <div style={{ ...s.btnGroup, borderColor: 'rgba(61,219,192,.35)' }}>
+            <button className="btn-teal" onClick={enablePrinterAll}>Enable Printer</button>
+            <button className="btn-teal" onClick={disablePrinterAll}>Disable Printer</button>
           </div>
+
+          <div style={{ ...s.btnGroup, borderColor: 'rgba(185,140,240,.35)' }}>
+            <button className="btn-violet" onClick={enableBvAll}>Enable BV</button>
+            <button className="btn-violet" onClick={disableBvAll}>Disable BV</button>
+          </div>
+
+          <div style={s.btnGroup}>
+            <button className="btn-gold" disabled={busy} onClick={handleAftIn}>AFT IN</button>
+            <button className="btn-danger" disabled={busy} onClick={handleAftOut}>AFT OUT</button>
+          </div>
+
+          <div style={{ flex: 1 }} />
+
+          {waitingNextRound ? (
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn-start" disabled={busy} onClick={handleStart}
+                style={{ width: 'auto', padding: '8px 20px', fontSize: 12 }}>
+                ▶  START ROUND {roundsCompleted + 1}
+              </button>
+              <button className="btn-neutral" disabled={busy} onClick={handleNewSession}>
+                NEW SESSION
+              </button>
+            </div>
+          ) : (
+            <button
+              className={`btn-start${tournamentActive ? ' running' : ''}`}
+              disabled={busy || tournamentActive}
+              onClick={handleStart}
+              style={{ width: 'auto', padding: '8px 20px', fontSize: 12 }}
+            >
+              {tournamentActive
+                ? `▶  ROUND ${roundsCompleted + 1} RUNNING`
+                : (sessionIdRef.current ? `START ROUND ${roundsCompleted + 1}` : 'START THE TOURNAMENT')
+              }
+            </button>
+          )}
+
+          <div style={{ flex: 1 }} />
+
+          {tournamentActive && timeLeft !== null && (
+            <div style={{ fontSize: 11, color: timeLeft <= 30 ? '#e06060' : 'var(--text-2)' }}>
+              <span style={{ letterSpacing: '.08em' }}>TIME LEFT </span>
+              <span style={{
+                fontFamily: 'Georgia, serif', fontSize: 16, fontWeight: 700,
+                fontVariantNumeric: 'tabular-nums',
+                color: timeLeft <= 30 ? '#e06060' : 'var(--gold)',
+              }}>
+                {String(Math.floor(timeLeft / 60)).padStart(2, '0')}:{String(timeLeft % 60).padStart(2, '0')}
+              </span>
+            </div>
+          )}
+          <button
+            className={`btn-stop${tournamentActive ? ' active' : ''}`}
+            disabled={!tournamentActive || busy}
+            onClick={handleStop}
+          >
+            STOP
+          </button>
         </div>
 
         {/* Round indicator */}
@@ -678,50 +725,6 @@ export default function App() {
             )}
           </div>
         )}
-
-        {waitingNextRound ? (
-          <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
-            <button className="btn-start" disabled={busy} onClick={handleStart} style={{ flex: 1 }}>
-              ▶  START ROUND {roundsCompleted + 1}
-            </button>
-            <button className="btn-neutral" disabled={busy} onClick={handleNewSession}>
-              NEW SESSION
-            </button>
-          </div>
-        ) : (
-          <button
-            className={`btn-start${tournamentActive ? ' running' : ''}`}
-            disabled={busy || tournamentActive}
-            onClick={handleStart}
-          >
-            {tournamentActive
-              ? `▶  ROUND ${roundsCompleted + 1} RUNNING`
-              : (sessionIdRef.current ? `START ROUND ${roundsCompleted + 1}` : 'START THE TOURNAMENT')
-            }
-          </button>
-        )}
-
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}>
-          {tournamentActive && timeLeft !== null ? (
-            <div style={{ fontSize: 11, color: timeLeft <= 30 ? '#e06060' : 'var(--text-2)' }}>
-              <span style={{ letterSpacing: '.08em' }}>TIME LEFT </span>
-              <span style={{
-                fontFamily: 'Georgia, serif', fontSize: 18, fontWeight: 700,
-                fontVariantNumeric: 'tabular-nums',
-                color: timeLeft <= 30 ? '#e06060' : 'var(--gold)',
-              }}>
-                {String(Math.floor(timeLeft / 60)).padStart(2, '0')}:{String(timeLeft % 60).padStart(2, '0')}
-              </span>
-            </div>
-          ) : <div />}
-          <button
-            className={`btn-stop${tournamentActive ? ' active' : ''}`}
-            disabled={!tournamentActive || busy}
-            onClick={handleStop}
-          >
-            STOP
-          </button>
-        </div>
       </div>
 
       {/* ── D. Tabbed Panel ──────────────────────────────────── */}
@@ -1126,12 +1129,17 @@ const s: Record<string, React.CSSProperties> = {
     background: 'var(--surface)', flexShrink: 0,
   },
   settingsGrid: {
-    display: 'grid', gridTemplateColumns: '1fr 1.4fr 1fr', gap: 10,
+    display: 'grid', gridTemplateColumns: '1fr 1.4fr 1fr 1.4fr', gap: 10,
   },
   fieldWrap: { display: 'flex', flexDirection: 'column', gap: 4 },
   fieldLabel: { fontSize: 10, color: 'var(--text-2)', letterSpacing: '.06em' },
   fieldRow: { display: 'flex', alignItems: 'center', gap: 4 },
   fieldUnit: { fontSize: 11, color: 'var(--text-3)', flexShrink: 0 },
+  btnGroup: {
+    display: 'flex', gap: 6,
+    border: '1px solid var(--border-2)', borderRadius: 6,
+    padding: '4px 6px',
+  },
   machineSection: {
     flex: 1, display: 'flex', flexDirection: 'column',
     overflow: 'hidden', background: 'var(--surface)',

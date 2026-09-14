@@ -70,6 +70,27 @@ button:disabled { opacity: .35; cursor: not-allowed; }
   border-color: rgba(176,48,48,.4);
 }
 
+.btn-blue {
+  background: rgba(91,184,255,.10);
+  color: #5bb8ff;
+  border-color: rgba(91,184,255,.4);
+}
+.btn-blue:hover { background: rgba(91,184,255,.20); }
+
+.btn-teal {
+  background: rgba(61,219,192,.10);
+  color: #3ddbc0;
+  border-color: rgba(61,219,192,.4);
+}
+.btn-teal:hover { background: rgba(61,219,192,.20); }
+
+.btn-violet {
+  background: rgba(185,140,240,.10);
+  color: #b98cf0;
+  border-color: rgba(185,140,240,.4);
+}
+.btn-violet:hover { background: rgba(185,140,240,.20); }
+
 .btn-start {
   width: 100%;
   padding: 16px;

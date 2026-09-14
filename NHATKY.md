@@ -768,4 +768,34 @@
     liệu thật từ máy hay lỗi tính toán, cần xem lại nếu gặp lại con số vô lý
     tương tự.
 
+- **Phiên riêng trên máy laptop này** (song song với phiên debug `tech4` ở
+  trên) — pull `origin/main` (`d130be5` → `93585aa`, fast-forward, không
+  conflict), lấy về đúng 4 commit mô tả ở các mục trên (fix boot-loop crash,
+  fix race MQTT offline, tab Logs). Build + flash thành công lên board tại
+  máy này (~20.5s, 921600 baud, hash verify khớp).
+- Khởi động lại backend + control-panel để test (Docker Desktop bị tắt lúc
+  máy khởi động lại — phải tự mở app trước, 3 container postgres/redis/
+  mosquitto có restart policy nên tự lên lại, không cần `docker-compose up`
+  thủ công).
+- **Dọn giao diện control-panel theo yêu cầu người dùng** (thuần UI, không
+  đổi logic):
+  1. Gộp "Session Name" (trước đây 1 hàng riêng dưới Jackpot Engine) vào
+     chung hàng lưới với Start Credit/Time per Round/Rounds — `settingsGrid`
+     từ 3 cột lên 4 cột (`1fr 1.4fr 1fr 1.4fr`).
+  2. Gộp toàn bộ nút điều khiển (Refresh, Enable All, Printer, BV, AFT IN/
+     OUT, START, STOP) từ 4 dòng rời rạc thành **1 dòng flex-wrap duy nhất**:
+     mỗi cặp nút liên quan (Enable/Disable All, Printer, BV, AFT IN/OUT) bọc
+     trong khung viền riêng (`s.btnGroup`), START thu nhỏ (~50%, bỏ
+     `width:100%` mặc định của `.btn-start`) nằm giữa nhờ 2 spacer `flex:1`
+     hai bên, STOP + TIME LEFT ở mép phải. Round indicator (SESSION: Round
+     x/y) chuyển xuống ngay dưới dòng gộp.
+  3. Thêm 3 class CSS mới (`.btn-blue`, `.btn-teal`, `.btn-violet` trong
+     `index.css`) để tô màu phân biệt từng khung nhóm nút: Enable/Disable
+     All = xanh dương, Printer = xanh ngọc, BV = tím — viền khung cũng đổi
+     màu theo tông tương ứng. AFT IN/OUT giữ nguyên vàng/đỏ đã có từ trước.
+  - Build `vite build` pass sau mỗi bước, verify bằng ảnh chụp màn hình thật
+    người dùng gửi trực tiếp trong lúc code (phát hiện + sửa ngay 1 bug qua
+    ảnh: `lineHeight:0` trên wrapper video kế thừa xuống làm chữ tên máy/số
+    tiền jackpot chồng lên nhau — xem thêm mục video jackpot hôm 09-13).
+
 ---
