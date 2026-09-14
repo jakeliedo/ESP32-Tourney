@@ -35,6 +35,8 @@ typedef struct {
     SlotState state;
     char     txn_id[21];     // Set when reporting AFT completion
     uint8_t  aft_status;     // Set when reporting AFT result
+    bool     bv_enabled;     // Bill validator state, ack'd by the machine (LP 0x06/0x07)
+    bool     printer_enabled; // Ticket cashout/redemption lockdown state (LP 0x7B)
 } MachineEvent;
 
 // ── Server command types ──────────────────────────────────────

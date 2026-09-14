@@ -139,6 +139,8 @@ static void serialize_and_publish(const MachineEvent* ev) {
     doc["coin_out"]   = ev->coin_out;
     doc["state"]      = (int)ev->state;
     doc["aft_status"] = ev->aft_status;
+    doc["bv_enabled"]      = ev->bv_enabled;
+    doc["printer_enabled"] = ev->printer_enabled;
     if (ev->txn_id[0] != '\0') doc["txn_id"] = ev->txn_id;
 
     char buf[256];

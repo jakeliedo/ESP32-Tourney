@@ -7,6 +7,14 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 
+export interface LogEntry {
+  machineId: string;
+  ts: number;
+  severity: 'info' | 'abnormal';
+  code: string;
+  message: string;
+}
+
 @WebSocketGateway({
   cors: { origin: '*' },
   namespace: '/leaderboard',
@@ -21,6 +29,10 @@ export class LeaderboardGateway implements OnGatewayConnection {
 
   broadcastMachineUpdate(machineId: string, data: object) {
     this.server.emit('machine_update', { machineId, ...data });
+  }
+
+  broadcastMachineLog(entry: LogEntry) {
+    this.server.emit('machine_log', entry);
   }
 
   broadcastLeaderboard(tournamentId: number, rankings: object[], roundNumber = 1, totalRounds = 1, endsAt = -1) {

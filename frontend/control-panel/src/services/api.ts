@@ -57,9 +57,20 @@ export interface SessionDto {
   rounds: RoundDto[];
 }
 
+export interface LogEntry {
+  machineId: string;
+  ts: number;
+  severity: 'info' | 'abnormal';
+  code: string;
+  message: string;
+}
+
 // Machines
 export const getMachines = (): Promise<Machine[]> =>
   api.get<Machine[]>('/machines').then(r => r.data);
+
+export const getLogs = (severity: 'all' | 'abnormal' = 'all', limit = 500): Promise<LogEntry[]> =>
+  api.get<LogEntry[]>('/machines/logs', { params: { severity, limit } }).then(r => r.data);
 
 export const sendMachineCommand = (
   id: string,

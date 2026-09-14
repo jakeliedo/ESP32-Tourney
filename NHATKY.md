@@ -532,3 +532,67 @@
   không cần `docker-compose up` lại thủ công).
 
 ---
+
+## 2026-09-14 (Thứ 2)
+
+- **Thêm tab "Logs" ở control-panel** (cạnh Players): 2 box song song — trái
+  là live log chung, phải là log lỗi bất thường (door open, BV/Printer
+  disabled, machine disabled). Quyết định thiết kế (chốt qua hỏi đáp trước
+  khi code):
+  - Log = **sự kiện có cấu trúc** lấy từ telemetry/MQTT đã có sẵn, không phải
+    raw SAS byte dump (tránh phải sửa firmware forward log thô mỗi 40ms).
+  - BV/Printer disabled phải là **xác nhận thật từ firmware** (ack thật của
+    LP 0x06/0x07/0x7B, vốn đã có sẵn nhưng bị bỏ qua ở nơi gọi), không suy
+    đoán từ việc backend vừa gửi lệnh.
+  - 10 máy hiển thị cùng lúc → **phân trang 5 máy/trang**, mỗi máy 1 cột
+    riêng trong từng box, tiêu đề trang kèm số máy đang có lỗi.
+  - Backend: `mqtt-gateway.service.ts` phân loại sự kiện (door open/close,
+    BV/printer ack, machine disable) + guard `statusChanged` để không log
+    trùng khi CMD_DISABLE toàn phần cũng làm đổi bv_enabled cùng lúc. Lưu
+    Redis capped list (`logs:all`/`logs:abnormal`, lần đầu dùng Redis List
+    trong project) + phát WebSocket `machine_log` + endpoint
+    `GET /api/machines/logs`.
+  - Firmware: thêm `bv_enabled`/`printer_enabled` vào `MachineEvent` +
+    telemetry JSON, lấy từ giá trị ack thật đã có sẵn của
+    `execute_simple_command()`/`set_ticket_printing()` (trước đây bị discard).
+  - **Verify toàn bộ không cần hardware thật**: build backend, bắn telemetry
+    giả qua script MQTT, đọc lại REST + nghe trực tiếp WebSocket bằng
+    `socket.io-client` — cả 8 kịch bản test đúng, đặc biệt 2 ca guard quan
+    trọng (DISABLE/ENABLE toàn phần không bị double-log kèm BV) đều pass.
+
+- **Phát hiện: backend + control-panel đang chạy như Windows Service qua
+  NSSM** (`ESP32Tourney-Backend`, `ESP32Tourney-ControlPanel`, tự động
+  restart khi bị kill) — đây là lý do control-panel cứ "tự hồi sinh" mỗi lần
+  kill thủ công trong lúc debug, gây nhầm lẫn tưởng có process rác/trùng.
+  Không phải do COM7 monitor (2 khái niệm "port" khác nhau hoàn toàn — COM
+  port serial vs TCP port web). Quyết định: giữ nguyên hiện trạng (backend
+  chạy tạm bằng tiến trình thủ công đã có code mới, control-panel service
+  tự phục vụ code mới nhất vì Vite dev đọc trực tiếp từ đĩa) — không đụng
+  vào service qua `sc`/`net stop` (bị chặn bởi permission classifier, đúng
+  vì đây là workload giống production).
+
+- **Fix UI nhỏ**: control-panel bị cắt/không cuộn được trên màn hình nhỏ.
+  Nguyên nhân: `s.shell` dùng `height:'100%'` cứng thay vì `minHeight`. Đổi
+  1 dòng → trang tự cuộn dọc bình thường khi nội dung dài hơn cửa sổ.
+
+- **Điều tra thật trên máy 01**: log tab không hiện sự kiện mở cửa dù user
+  vừa mở cửa máy. Bắt trực tiếp MQTT 15 giây → phát hiện máy gửi liên tục
+  `exception: 0x1F` ("No activity... obsolete") ở **mọi** General Poll cycle
+  khi rảnh, không hề có khoảng nào là `0x00` thật. `report_event()`
+  (`sas_polling.cpp`) trước đây gọi mỗi lần exception != 0 **không khử
+  trùng lặp** → hàng đợi `g_report_queue` (non-blocking, drop-nếu-đầy) bị
+  dội bom hàng chục lần/giây bởi `0x1F` giả, nghi ngờ đây là lý do sự kiện
+  thật (door open 0x11) bị rớt mất giữa lúc đó.
+  - **Fix**: thêm `last_reported_exception` + `is_new_exception`, chỉ
+    `report_event()` khi exception **thay đổi** so với lần poll trước (áp
+    dụng cho cả door open/close, handpay, và nhánh default) — máy có lặp
+    lại `0x1F` bao nhiêu lần cũng chỉ log 1 lần đầu tiên.
+  - Build firmware OK. **Thử flash lên board thật thất bại**: esptool báo
+    `No serial data received` khi ở boot mode — nghi ngờ thao tác tay
+    GPIO9/EN chưa đúng nhịp hoặc tiếp xúc jumper kém. **Tạm dừng theo yêu
+    cầu người dùng, chưa flash xong** — việc còn dang dở cho lần sau: vào
+    lại boot mode đúng quy trình (xem mục "Quy trình vào Boot Mode" trong
+    `CLAUDE.md`) rồi `pio run -e eth01evo --target upload` ngay khi board
+    vừa sẵn sàng (đừng để trễ giữa 2 bước).
+
+---

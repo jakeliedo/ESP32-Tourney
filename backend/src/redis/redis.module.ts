@@ -80,6 +80,17 @@ export class RedisService implements OnModuleInit {
     return v ? parseFloat(v) : 0;
   }
 
+  // ── Event log backlog (capped Redis lists) ──────────────────
+  async pushLog(key: string, entry: object, maxLen: number): Promise<void> {
+    await this.client.lpush(key, JSON.stringify(entry));
+    await this.client.ltrim(key, 0, maxLen - 1);
+  }
+
+  async getLogs(key: string, limit: number): Promise<any[]> {
+    const raw = await this.client.lrange(key, 0, limit - 1);
+    return raw.map(r => JSON.parse(r)).reverse(); // oldest→newest for top-to-bottom render
+  }
+
   // ── Generic helpers ─────────────────────────────────────────
   async get(key: string): Promise<string | null> {
     return this.client.get(key);

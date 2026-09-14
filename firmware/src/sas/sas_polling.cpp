@@ -113,6 +113,14 @@ QueueHandle_t g_report_queue  = NULL;
 static volatile SlotState s_state = SLOT_STATE_INIT;
 static int     s_retry_count      = 0;
 
+// Real bill-validator / ticket-printer state, ack'd by the machine (not
+// just "we sent the command") -- see report_event() and the CMD_*_BV /
+// CMD_*_PRINTER cases below. bv starts true (no boot-time disable call for
+// it); printer starts false to match the boot-time set_ticket_printing(false)
+// lockdown (see sas_polling_task()'s startup sequence).
+static bool s_bv_enabled      = true;
+static bool s_printer_enabled = false;
+
 // AFT registration state (LP 0x73) -- obtained once from the machine and
 // then reused on every LP 0x72 transfer. Added 2026-09-05: transfers kept
 // failing with AFT_STATUS_BAD_ASSET even with the machine's own confirmed
@@ -347,6 +355,8 @@ static void report_event(uint8_t exc, uint32_t credits,
     ev.coin_out       = coin_out;
     ev.state          = s_state;
     ev.aft_status     = aft_status;
+    ev.bv_enabled     = s_bv_enabled;
+    ev.printer_enabled = s_printer_enabled;
     if (txn_id) strncpy(ev.txn_id, txn_id, 20);
     else        ev.txn_id[0] = '\0';
 
@@ -900,6 +910,16 @@ void sas_polling_task(void* pvParameters) {
     uint32_t last_coin_in  = 0;
     uint32_t last_coin_out = 0;
 
+    // Some EGMs (confirmed on this machine, 2026-09-14) never settle back to
+    // SAS_EXC_NO_ACTIVITY while idle -- General Poll keeps re-queuing the
+    // same obsolete "waiting for player input" exception (0x1F) on every
+    // single ~40ms cycle instead of clearing it. Without dedup, that floods
+    // report_event()/g_report_queue (non-blocking xQueueSend, drops when
+    // full) dozens of times a second, which can crowd out a genuine one-shot
+    // exception (e.g. 0x11 door open) queued in the same window. Only report
+    // an exception when it's actually NEW compared to the previous poll.
+    uint8_t last_reported_exception = SAS_EXC_NO_ACTIVITY;
+
     // Coin-in inferred from the credit meter (2026-09-10): this machine
     // never responds to LP 0xAF (Meters), so `last_coin_in` above never
     // moves from 0 -- the real coin-in meter is simply unreachable on this
@@ -1010,33 +1030,33 @@ void sas_polling_task(void* pvParameters) {
                 case CMD_DISABLE:
                     execute_simple_command(SAS_CMD_SHUTDOWN);
                     vTaskDelay(pdMS_TO_TICKS(40));
-                    execute_simple_command(SAS_CMD_DISABLE_BILL);
+                    if (execute_simple_command(SAS_CMD_DISABLE_BILL)) s_bv_enabled = false;
                     s_state = SLOT_STATE_DISABLED;
                     ESP_LOGI(TAG, "DISABLE: LP 0x01 + LP 0x07 sent");
                     break;
                 case CMD_ENABLE:
                     execute_simple_command(SAS_CMD_STARTUP);
                     vTaskDelay(pdMS_TO_TICKS(40));
-                    execute_simple_command(SAS_CMD_ENABLE_BILL);
+                    if (execute_simple_command(SAS_CMD_ENABLE_BILL)) s_bv_enabled = true;
                     s_state = SLOT_STATE_IDLE;
                     ESP_LOGI(TAG, "ENABLE: LP 0x02 + LP 0x06 sent");
                     break;
                 case CMD_ENABLE_BV:
-                    execute_simple_command(SAS_CMD_ENABLE_BILL);
-                    ESP_LOGI(TAG, "ENABLE_BV: LP 0x06 sent");
+                    if (execute_simple_command(SAS_CMD_ENABLE_BILL)) s_bv_enabled = true;
+                    ESP_LOGI(TAG, "ENABLE_BV: LP 0x06 sent (acked=%d)", s_bv_enabled);
                     break;
                 case CMD_DISABLE_BV:
-                    execute_simple_command(SAS_CMD_DISABLE_BILL);
-                    ESP_LOGI(TAG, "DISABLE_BV: LP 0x07 sent");
+                    if (execute_simple_command(SAS_CMD_DISABLE_BILL)) s_bv_enabled = false;
+                    ESP_LOGI(TAG, "DISABLE_BV: LP 0x07 sent (acked=%d)", !s_bv_enabled);
                     break;
                 case CMD_ENABLE_PRINTER:
                     for (int attempt = 0; attempt < 3; attempt++) {
-                        if (set_ticket_printing(true)) break;
+                        if (set_ticket_printing(true)) { s_printer_enabled = true; break; }
                     }
                     break;
                 case CMD_DISABLE_PRINTER:
                     for (int attempt = 0; attempt < 3; attempt++) {
-                        if (set_ticket_printing(false)) break;
+                        if (set_ticket_printing(false)) { s_printer_enabled = false; break; }
                     }
                     break;
                 default:
@@ -1057,6 +1077,13 @@ void sas_polling_task(void* pvParameters) {
 
         uint8_t exception = (n > 0) ? exc_byte : SAS_EXC_NO_ACTIVITY;
 
+        // See last_reported_exception's declaration above for why this
+        // exists -- only the FIRST poll cycle reporting a given exception
+        // value logs/report_event()s it; a machine that keeps re-queuing
+        // the same code every cycle no longer floods the report queue.
+        bool is_new_exception = (exception != last_reported_exception);
+        last_reported_exception = exception;
+
         // ── 3. Update state machine based on exception ──────────
         switch (exception) {
             case SAS_EXC_NO_ACTIVITY:
@@ -1068,24 +1095,28 @@ void sas_polling_task(void* pvParameters) {
 
             case SAS_EXC_SLOT_DOOR_OPENED:
                 jackpot_freeze = true;
-                ESP_LOGW(TAG, "EXC 0x11: Slot door OPENED -- freezing jackpot wager-inference "
-                              "until door closes (service access, not real player activity)");
-                report_event(exception, last_credits,
-                             real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
-                             last_coin_out, 0, NULL);
+                if (is_new_exception) {
+                    ESP_LOGW(TAG, "EXC 0x11: Slot door OPENED -- freezing jackpot wager-inference "
+                                  "until door closes (service access, not real player activity)");
+                    report_event(exception, last_credits,
+                                 real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                                 last_coin_out, 0, NULL);
+                }
                 break;
 
             case SAS_EXC_SLOT_DOOR_CLOSED:
                 jackpot_freeze = false;
-                ESP_LOGI(TAG, "EXC 0x12: Slot door CLOSED -- jackpot wager-inference resumed");
-                report_event(exception, last_credits,
-                             real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
-                             last_coin_out, 0, NULL);
+                if (is_new_exception) {
+                    ESP_LOGI(TAG, "EXC 0x12: Slot door CLOSED -- jackpot wager-inference resumed");
+                    report_event(exception, last_credits,
+                                 real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                                 last_coin_out, 0, NULL);
+                }
                 break;
 
             case SAS_EXC_HANDPAY_PENDING:
                 s_state = SLOT_STATE_HANDPAY;
-                {
+                if (is_new_exception) {
                     size_t hp_len = sas_build_lp_handpay(lp_frame, g_machine_id);
                     sas_send_frame(lp_frame, hp_len);
                     size_t hn = sas_receive(resp_buf, sizeof(resp_buf), SAS_LONG_POLL_TIMEOUT);
@@ -1105,7 +1136,7 @@ void sas_polling_task(void* pvParameters) {
                 break;
 
             default:
-                if (exception != SAS_EXC_NO_ACTIVITY) {
+                if (exception != SAS_EXC_NO_ACTIVITY && is_new_exception) {
                     ESP_LOGI(TAG, "EXC 0x%02X: %s", exception, exc_name(exception));
                     report_event(exception, last_credits,
                                  real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,

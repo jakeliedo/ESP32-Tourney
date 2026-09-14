@@ -13,7 +13,7 @@ import { RedisService } from '../redis/redis.module';
 import { MachineEntity, MachineStatus } from '../database/entities/machine.entity';
 import { TransactionEntity, TransactionStatus } from '../database/entities/transaction.entity';
 import { TournamentEntity, TournamentStatus } from '../database/entities/tournament.entity';
-import { LeaderboardGateway } from './leaderboard.gateway';
+import { LeaderboardGateway, LogEntry } from './leaderboard.gateway';
 
 interface TelemetryPayload {
   machine_id: string;
@@ -24,6 +24,8 @@ interface TelemetryPayload {
   state: number;
   aft_status?: number;
   txn_id?: string;
+  bv_enabled?: boolean;
+  printer_enabled?: boolean;
 }
 
 interface ServerCommand {
@@ -38,6 +40,9 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
   private client: mqtt.MqttClient;
   private lastCoinIn   = new Map<string, number>();
   private lastCredits  = new Map<string, number>();
+  private lastStatus   = new Map<string, MachineStatus>();
+  private lastBv       = new Map<string, boolean>();
+  private lastPrinter  = new Map<string, boolean>();
 
   constructor(
     private cfg: ConfigService,
@@ -170,10 +175,71 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    // 4. Push machine update via WebSocket
+    // 4. Classify this update into a log entry (door open/close, BV/printer
+    //    disable ack'd by firmware, full machine disable) and fan it out to
+    //    the capped Redis backlog + `machine_log` WebSocket event for the
+    //    control panel's Logs tab. Only fires on an actual transition, never
+    //    on the first-ever telemetry for a machine (prevStatus/prevBv/
+    //    prevPrinter undefined) or a repeat of the same value.
+    //
+    //    statusChanged guards the BV/printer entries because CMD_DISABLE/
+    //    CMD_ENABLE flip bv_enabled in the SAME telemetry message as the
+    //    status transition -- that's already covered by MACHINE_DISABLED/
+    //    MACHINE_ENABLED below, so logging BV separately there would just
+    //    be a duplicate. Standalone CMD_(EN|DIS)ABLE_BV / CMD_*_PRINTER
+    //    commands never touch `status`, so they aren't affected by the guard.
+    const newStatus = this.stateToStatus(data.state);
+    const prevStatus = this.lastStatus.get(machineId);
+    const statusChanged = prevStatus !== undefined && prevStatus !== newStatus;
+    this.lastStatus.set(machineId, newStatus);
+
+    const entries: LogEntry[] = [];
+    const log = (severity: LogEntry['severity'], code: string, message: string) =>
+      entries.push({ machineId, ts: Date.now(), severity, code, message });
+
+    if (data.exception === 0x11) log('abnormal', 'DOOR_OPEN', 'Slot door OPENED');
+    if (data.exception === 0x12) log('info', 'DOOR_CLOSE', 'Slot door closed');
+
+    if (statusChanged && newStatus === MachineStatus.DISABLED) {
+      log('abnormal', 'MACHINE_DISABLED', 'Machine DISABLED');
+    } else if (statusChanged && prevStatus === MachineStatus.DISABLED) {
+      log('info', 'MACHINE_ENABLED', 'Machine re-enabled');
+    }
+
+    if (data.bv_enabled !== undefined) {
+      const prevBv = this.lastBv.get(machineId);
+      if (prevBv !== undefined && prevBv !== data.bv_enabled && !statusChanged) {
+        log(
+          data.bv_enabled ? 'info' : 'abnormal',
+          data.bv_enabled ? 'BV_ENABLED' : 'BV_DISABLED',
+          data.bv_enabled ? 'Bill validator re-enabled' : 'Bill validator DISABLED',
+        );
+      }
+      this.lastBv.set(machineId, data.bv_enabled);
+    }
+
+    if (data.printer_enabled !== undefined) {
+      const prevPrinter = this.lastPrinter.get(machineId);
+      if (prevPrinter !== undefined && prevPrinter !== data.printer_enabled && !statusChanged) {
+        log(
+          data.printer_enabled ? 'info' : 'abnormal',
+          data.printer_enabled ? 'PRINTER_ENABLED' : 'PRINTER_DISABLED',
+          data.printer_enabled ? 'Printer re-enabled' : 'Printer DISABLED',
+        );
+      }
+      this.lastPrinter.set(machineId, data.printer_enabled);
+    }
+
+    for (const entry of entries) {
+      await this.redis.pushLog('logs:all', entry, 1000);
+      if (entry.severity === 'abnormal') await this.redis.pushLog('logs:abnormal', entry, 300);
+      this.leaderboard.broadcastMachineLog(entry);
+    }
+
+    // 5. Push machine update via WebSocket
     this.leaderboard.broadcastMachineUpdate(machineId, data);
 
-    // 5. Update tournament leaderboard when credits change.
+    // 6. Update tournament leaderboard when credits change.
     //    ALL machines are tracked in the sorted set (not just machine_ids) so the
     //    leaderboard always shows every connected machine's current credits.
     const lastCreds = this.lastCredits.get(machineId);

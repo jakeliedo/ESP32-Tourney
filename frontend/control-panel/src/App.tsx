@@ -6,8 +6,8 @@ import api, {
   setVirtualJackpotConfig, setRealJackpotConfig, setJackpotMode, getJackpotMode,
   getVirtualJackpotVideoUrl, uploadJackpotVideo, clearJackpotVideo,
   getJackpotHits,
-  Machine, Player, SessionDto, JackpotHit, JackpotMode,
-  getHistory, getPlayers, upsertPlayer, deletePlayer,
+  Machine, Player, SessionDto, JackpotHit, JackpotMode, LogEntry,
+  getHistory, getPlayers, upsertPlayer, deletePlayer, getLogs,
 } from './services/api';
 
 const APP_VERSION = 'v1.0.0';
@@ -50,9 +50,11 @@ export default function App() {
   const [waitingNextRound, setWaitingNextRound] = useState(false);
   const [lbOnline, setLbOnline]              = useState(false);
   const [busy, setBusy]                      = useState(false);
-  const [sideTab, setSideTab]                = useState<'machines'|'history'|'players'>('machines');
+  const [sideTab, setSideTab]                = useState<'machines'|'history'|'players'|'logs'>('machines');
   const [history, setHistory]                = useState<SessionDto[]>([]);
   const [players, setPlayers]                = useState<Player[]>([]);
+  const [logEntries, setLogEntries]          = useState<LogEntry[]>([]);
+  const [logPage, setLogPage]                = useState(0);
   const [newMembership, setNewMembership]    = useState('');
   const [newPlayerName, setNewPlayerName]    = useState('');
   const [sessionName, setSessionName]        = useState('');
@@ -81,6 +83,9 @@ export default function App() {
     socketRef.current = s;
     s.on('connect',    () => setLbOnline(true));
     s.on('disconnect', () => setLbOnline(false));
+    s.on('machine_log', (entry: LogEntry) => {
+      setLogEntries(prev => [...prev, entry].slice(-1000));
+    });
     s.on('machine_update', (data: any) => {
       setMachines(prev => prev.map(m =>
         m.machine_id === data.machineId
@@ -394,10 +399,15 @@ export default function App() {
     getPlayers().then(setPlayers).catch(() => {});
   }, []);
 
+  const loadLogs = useCallback(() => {
+    getLogs('all', 500).then(setLogEntries).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (sideTab === 'history') loadHistory();
     if (sideTab === 'players') loadPlayers();
-  }, [sideTab, loadHistory, loadPlayers]);
+    if (sideTab === 'logs') loadLogs();
+  }, [sideTab, loadHistory, loadPlayers, loadLogs]);
 
   const handleAddPlayer = async () => {
     if (!newMembership.trim()) return;
@@ -417,6 +427,21 @@ export default function App() {
   const roundTime      = parseTotalSeconds(settings.timeMM, settings.timeSS);
   const currentRoundNum = tournamentActive ? roundsCompleted + 1 : (waitingNextRound ? roundsCompleted + 1 : roundsCompleted + 1);
   const isFinalRound    = totalRounds > 0 && currentRoundNum === totalRounds;
+
+  // ── Logs tab: paginate machines 5-per-page so each machine gets its own
+  // readable column instead of cramming up to 10 side by side (per-page
+  // group size chosen with the user rather than a fixed "show all" grid).
+  const sortedMachines = [...machines].sort((a, b) => a.machine_id.localeCompare(b.machine_id));
+  const machinePages: Machine[][] = [];
+  for (let i = 0; i < sortedMachines.length; i += 5) machinePages.push(sortedMachines.slice(i, i + 5));
+  const safeLogPage = Math.min(logPage, Math.max(0, machinePages.length - 1));
+  const currentPageMachines = machinePages[safeLogPage] ?? [];
+  const abnormalMachineCount = (pageMachines: Machine[]) =>
+    new Set(
+      logEntries
+        .filter(e => e.severity === 'abnormal' && pageMachines.some(m => m.machine_id === e.machineId))
+        .map(e => e.machineId),
+    ).size;
 
   return (
     <div style={s.shell}>
@@ -704,7 +729,7 @@ export default function App() {
         {/* Tab bar */}
         <div style={s.machineHeader}>
           <div style={{ display: 'flex', gap: 0 }}>
-            {(['machines', 'history', 'players'] as const).map(tab => (
+            {(['machines', 'history', 'players', 'logs'] as const).map(tab => (
               <button
                 key={tab}
                 className="btn-neutral"
@@ -726,6 +751,9 @@ export default function App() {
           )}
           {sideTab === 'players' && (
             <button className="btn-neutral" style={{ fontSize: 10 }} onClick={loadPlayers}>Refresh</button>
+          )}
+          {sideTab === 'logs' && (
+            <button className="btn-neutral" style={{ fontSize: 10 }} onClick={loadLogs}>Refresh</button>
           )}
         </div>
 
@@ -874,6 +902,53 @@ export default function App() {
               ))}
             </div>
           )}
+
+          {/* Logs tab */}
+          {sideTab === 'logs' && (
+            <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              {machinePages.length > 1 && (
+                <div style={{
+                  display: 'flex', gap: 4, padding: '6px 14px', flexWrap: 'wrap',
+                  borderBottom: '1px solid var(--border)', flexShrink: 0,
+                }}>
+                  {machinePages.map((group, i) => {
+                    const count = abnormalMachineCount(group);
+                    const label = group.length
+                      ? (group.length > 1 ? `${group[0].machine_id}–${group[group.length - 1].machine_id}` : group[0].machine_id)
+                      : `Page ${i + 1}`;
+                    return (
+                      <button
+                        key={i}
+                        className="btn-neutral"
+                        onClick={() => setLogPage(i)}
+                        style={{
+                          fontSize: 10,
+                          fontWeight: safeLogPage === i ? 700 : 400,
+                          color: safeLogPage === i ? 'var(--gold)' : 'var(--text-2)',
+                          borderColor: safeLogPage === i ? 'var(--gold-dim)' : undefined,
+                        }}
+                      >
+                        {label}
+                        {count > 0 && <span style={{ color: 'var(--handpay)', marginLeft: 4 }}>⚠ {count}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {currentPageMachines.length === 0 ? (
+                <div style={s.empty}>No machines connected</div>
+              ) : (
+                <div style={{ flex: 1, display: 'flex', gap: 10, padding: '10px 14px', overflow: 'hidden' }}>
+                  <LogBox title="Live Log" machines={currentPageMachines} entries={logEntries} />
+                  <LogBox
+                    title="Abnormal Events"
+                    machines={currentPageMachines}
+                    entries={logEntries.filter(e => e.severity === 'abnormal')}
+                  />
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -959,10 +1034,72 @@ function MachineRow({
   );
 }
 
+// ── Logs tab: one scrolling column per machine, auto-scrolled to the
+// newest entry. Kept as small standalone components (rather than inlined
+// in the JSX above) since each column needs its own scroll ref.
+function LogColumn({ machine, entries }: { machine: Machine; entries: LogEntry[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const mine = entries.filter(e => e.machineId === machine.machine_id).slice(-100);
+
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [mine.length]);
+
+  const st = machine.status.toLowerCase();
+  const dotCls = ['online', 'offline', 'locked', 'handpay', 'disabled', 'playing'].includes(st) ? `dot-${st}` : 'dot-offline';
+
+  return (
+    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)' }}>
+      <div style={{
+        padding: '4px 8px', borderBottom: '1px solid var(--border)', fontSize: 10, fontWeight: 700,
+        color: 'var(--gold)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4,
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      }}>
+        <span className={`dot ${dotCls}`} />{machine.machine_id}
+      </div>
+      <div ref={ref} style={{ flex: 1, overflowY: 'auto', padding: '4px 6px', fontSize: 10, fontFamily: 'monospace' }}>
+        {mine.length === 0 && <div style={{ color: 'var(--text-3)', padding: '6px 0' }}>—</div>}
+        {mine.map((e, i) => {
+          const t = new Date(e.ts);
+          const time = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}`;
+          return (
+            <div key={`${e.ts}-${e.code}-${i}`} style={{
+              padding: '2px 0', borderBottom: '1px solid var(--border)',
+              color: e.severity === 'abnormal' ? 'var(--handpay)' : 'var(--text-2)',
+            }}>
+              <span style={{ color: 'var(--text-3)', marginRight: 4 }}>{time}</span>{e.message}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function LogBox({ title, machines, entries }: { title: string; machines: Machine[]; entries: LogEntry[] }) {
+  return (
+    <div style={{
+      flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+      border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden',
+    }}>
+      <div style={{
+        padding: '5px 10px', background: 'var(--surface-3)', borderBottom: '1px solid var(--border-2)',
+        fontSize: 10, fontWeight: 700, letterSpacing: '.06em', color: 'var(--text-2)',
+        textTransform: 'uppercase', flexShrink: 0,
+      }}>
+        {title}
+      </div>
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {machines.map(m => <LogColumn key={m.machine_id} machine={m} entries={entries} />)}
+      </div>
+    </div>
+  );
+}
+
 // ── Styles ────────────────────────────────────────────────────
 const s: Record<string, React.CSSProperties> = {
   shell: {
-    height: '100%', display: 'flex', flexDirection: 'column',
+    minHeight: '100%', display: 'flex', flexDirection: 'column',
     maxWidth: 940, margin: '0 auto',
     borderLeft: '1px solid var(--border)', borderRight: '1px solid var(--border)',
   },
