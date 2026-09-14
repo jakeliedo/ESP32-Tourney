@@ -623,4 +623,41 @@
     này. Cần flash lại (máy khác hoặc vào lại boot mode ở máy này) ngay
     khi có thể.
 
+- **Cập nhật cùng ngày — fix `-Wl,-u,_printf_float` ở trên SAI, tự nó là
+  nguyên nhân crash, không phải cách sửa.** Sau khi flash bản có cờ đó lên
+  máy 01 và bắt serial: **vẫn crash y hệt** — `rst:0x1 (POWERON)` lặp mỗi
+  ~91ms một lần đầu (nghi ngờ ban đầu là brownout nguồn), sau đó đổi sang
+  `rst:0xc (RTC_SW_CPU_RST)` kèm `Guru Meditation Error: ... Illegal
+  instruction` lặp đều mỗi ~3.2s, luôn ngay sau dòng log
+  "Machine online → IDLE" → đúng lúc nhánh `%.2f` credits đầu tiên chạy.
+  - **Giải mã lại bằng `addr2line`** trên chính `.elf` vừa flash (không chỉ
+    build, lần này verify trên hardware thật): `MEPC`/`RA` vẫn trỏ vào
+    `_svfprintf_r`, dòng `vfprintf.c:1213` — tức **crash NẰM BÊN TRONG**
+    chính cái hàm mà cờ `-Wl,-u,_printf_float` ép linker phải kéo vào.
+  - **Kết luận đúng**: giả thuyết "newlib nano thiếu symbol nên phải force-
+    link" chỉ đúng một nửa — symbol link được thật (không lỗi link), nhưng
+    bản `_svfprintf_r` có sẵn trong `framework-arduinoespressif32-libs`
+    (thư viện tiền-biên-dịch, không tự build từ nguồn) khi thực thi float
+    formatting lại phát ra **lệnh FPU phần cứng thật** — mà ESP32-C3 là
+    **RV32IMC, không có F/D extension** → CPU nhảy `Illegal instruction`
+    ngay khi gặp lệnh đó. Link thành công ("symbol tồn tại") **không đồng
+    nghĩa an toàn khi chạy** — đây là bài học chính, đừng lặp lại suy luận
+    "build/link pass = fix đúng" cho các trường hợp liên quan float trên
+    chip không có FPU.
+  - **Fix thật**: bỏ cờ `-Wl,-u,_printf_float` khỏi `platformio.ini`, và xoá
+    toàn bộ 7 chỗ dùng `%f`/`%.2f` trong `sas_polling.cpp` (credits, handpay
+    0x51, wager-infer, meters, Total Coin In, AFT interrogate-timeout log),
+    thay bằng format nguyên số nguyên `%lu.%02lu` (dollars.cents tách riêng
+    bằng `/100` và `%100`) — không còn phép tính hay format float nào trên
+    đường đi này nữa, khớp đúng quy ước "không dùng float cho tiền" đã áp
+    dụng ở backend/frontend từ trước.
+  - **Verify trên hardware thật**: build lại, flash lại máy 01, bắt serial
+    liên tục 30 giây — **0 lần reset, 0 lần Guru Meditation**, board chạy
+    xuyên suốt qua nhiều chu kỳ Credits poll (kể cả khi credits đổi giá trị,
+    nhánh log từng crash trước đây) không còn lỗi gì. `_svfprintf_r` vẫn
+    còn tồn tại trong `.elf` (nm xác nhận — có thư viện khác như
+    ArduinoJson/PubSubClient tham chiếu float ở đâu đó) nhưng không còn
+    đường gọi nào từ code SAS của mình chạm tới nó nữa → an toàn dù symbol
+    vẫn có mặt trong binary.
+
 ---

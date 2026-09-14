@@ -151,6 +151,7 @@ Backend cập nhật DB status = SUCCESS | FAILED (aft_status_code)
 - **`end()` / `cancel()` atomic** – `UPDATE WHERE status=ACTIVE`; nếu `affected=0` return ngay.
 - **DISABLED không được AFT_WITHDRAW** – chặn ở cả firmware (`s_state==SLOT_STATE_DISABLED`) và backend (check DB status trước khi gửi MQTT). Xem mục "AFT / Denomination / Ticket Control" bên dưới.
 - **Tiền/cent: luôn `Math.round()`, không bao giờ `Math.floor()`/`parseInt()`** khi convert dollar↔cents hoặc có phép nhân/chia float. Xem mục "AFT / Denomination / Ticket Control" bên dưới.
+- **Firmware: KHÔNG BAO GIỜ dùng `%f`/`%.2f` (hay bất kỳ float/double nào) trong `ESP_LOGx`/`printf` trên `sas_polling.cpp` hoặc bất kỳ file firmware nào khác.** ESP32-C3 là RV32IMC — **không có FPU phần cứng**. Đã xác nhận thật trên máy 01 (2026-09-14, xem `NHATKY.md`): `%.2f` gây crash `Guru Meditation Error: Illegal instruction` bên trong `_svfprintf_r` của newlib mỗi lần thực thi — không phải lỗi build/link (link vẫn pass bình thường), chỉ crash lúc chạy thật. Thêm cờ linker `-Wl,-u,_printf_float` để "fix" **KHÔNG giải quyết được** — bản thân cờ đó ép link vào đúng hàm gây crash, chỉ nên dùng cách format tiền bằng số nguyên: tách `cents/100` và `cents%100`, in bằng `"%lu.%02lu"`.
 
 ---
 

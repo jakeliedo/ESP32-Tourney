@@ -660,11 +660,11 @@ static void execute_aft_command(const ServerCommand* cmd) {
                     }
                 }
                 if (!resolved) {
-                    ESP_LOGW(TAG, "AFT: still pending after %d interrogation attempts (%.1fs), "
+                    ESP_LOGW(TAG, "AFT: still pending after %d interrogation attempts (%lums), "
                                   "giving up for now -- machine will keep reissuing exception 0x69 "
                                   "until acknowledged  txn=%s",
                              AFT_INTERROGATE_MAX_ATTEMPTS,
-                             AFT_INTERROGATE_MAX_ATTEMPTS * AFT_INTERROGATE_INTERVAL_MS / 1000.0f,
+                             (unsigned long)(AFT_INTERROGATE_MAX_ATTEMPTS * AFT_INTERROGATE_INTERVAL_MS),
                              cmd->txn_id);
                 }
             }
@@ -1124,9 +1124,9 @@ void sas_polling_task(void* pvParameters) {
                         SasHandpayResponse hp = sas_parse_handpay(resp_buf, hn);
                         if (hp.valid) {
                             uint32_t hp_cents = credits_to_cents(hp.handpay_amount);
-                            ESP_LOGW(TAG, "EXC 0x51: HANDPAY pending – amount=%lu ($%.2f)",
+                            ESP_LOGW(TAG, "EXC 0x51: HANDPAY pending – amount=%lu ($%lu.%02lu)",
                                      (unsigned long)hp.handpay_amount,
-                                     hp_cents / 100.0f);
+                                     (unsigned long)(hp_cents / 100), (unsigned long)(hp_cents % 100));
                             report_event(exception, hp_cents, 0, 0, 0, NULL);
                         }
                     } else {
@@ -1164,9 +1164,9 @@ void sas_polling_task(void* pvParameters) {
                 uint32_t cr_cents = credits_to_cents(cr.credits);
                 if (cr_cents != last_credits) {
                     int32_t delta = (int32_t)cr_cents - (int32_t)last_credits;
-                    ESP_LOGI(TAG, "Credits: %lu raw (denom-converted %lu) (%+ld)  $%.2f",
+                    ESP_LOGI(TAG, "Credits: %lu raw (denom-converted %lu) (%+ld)  $%lu.%02lu",
                              (unsigned long)cr.credits, (unsigned long)cr_cents, (long)delta,
-                             cr_cents / 100.0f);
+                             (unsigned long)(cr_cents / 100), (unsigned long)(cr_cents % 100));
 
                     if (delta < 0) {
                         if (suppress_next_wager_decrease) {
@@ -1178,9 +1178,10 @@ void sas_polling_task(void* pvParameters) {
                                           "likely a service adjustment, not a real wager)", (long)(-delta));
                         } else {
                             inferred_wagered_cents += (uint32_t)(-delta);
-                            ESP_LOGI(TAG, "Wager-infer: +%ld  cumulative=%lu ($%.2f)",
+                            ESP_LOGI(TAG, "Wager-infer: +%ld  cumulative=%lu ($%lu.%02lu)",
                                      (long)(-delta), (unsigned long)inferred_wagered_cents,
-                                     inferred_wagered_cents / 100.0f);
+                                     (unsigned long)(inferred_wagered_cents / 100),
+                                     (unsigned long)(inferred_wagered_cents % 100));
                         }
                     }
 
@@ -1209,9 +1210,11 @@ void sas_polling_task(void* pvParameters) {
                     uint32_t coin_in_cents  = credits_to_cents(mr.coin_in);
                     uint32_t coin_out_cents = credits_to_cents(mr.coin_out);
                     if (coin_in_cents != last_coin_in || coin_out_cents != last_coin_out) {
-                        ESP_LOGI(TAG, "Meters: coin_in=%lu ($%.2f)  coin_out=%lu ($%.2f)  played=%lu",
-                                 (unsigned long)coin_in_cents,  coin_in_cents  / 100.0f,
-                                 (unsigned long)coin_out_cents, coin_out_cents / 100.0f,
+                        ESP_LOGI(TAG, "Meters: coin_in=%lu ($%lu.%02lu)  coin_out=%lu ($%lu.%02lu)  played=%lu",
+                                 (unsigned long)coin_in_cents,
+                                 (unsigned long)(coin_in_cents / 100), (unsigned long)(coin_in_cents % 100),
+                                 (unsigned long)coin_out_cents,
+                                 (unsigned long)(coin_out_cents / 100), (unsigned long)(coin_out_cents % 100),
                                  (unsigned long)mr.games_played);
                     }
                     last_coin_in  = coin_in_cents;
@@ -1262,8 +1265,9 @@ void sas_polling_task(void* pvParameters) {
                                       "machine -- now authoritative for coin_in (was: credit-delta inference)");
                     }
                     if (new_cents != real_coin_in_cents) {
-                        ESP_LOGI(TAG, "Total Coin In: %lu ($%.2f)",
-                                 (unsigned long)new_cents, new_cents / 100.0f);
+                        ESP_LOGI(TAG, "Total Coin In: %lu ($%lu.%02lu)",
+                                 (unsigned long)new_cents,
+                                 (unsigned long)(new_cents / 100), (unsigned long)(new_cents % 100));
                     }
                     real_coin_in_cents = new_cents;
                     real_coin_in_valid = true;
