@@ -43,6 +43,22 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
   private lastStatus   = new Map<string, MachineStatus>();
   private lastBv       = new Map<string, boolean>();
   private lastPrinter  = new Map<string, boolean>();
+  // Per-machine processing queue: `client.on('message', ...)` below fires
+  // handleMessage() without awaiting it, and mqtt.js does not wait for a
+  // listener's promise before delivering the next message -- so a status
+  // "offline" (broker's LWT for a just-dropped session) and the immediately
+  // following "online" (from the same board's reconnect, e.g. during a
+  // session-takeover reconnect burst) could run as two *concurrent*
+  // handleMessage() calls with no guaranteed DB-write order, leaving the
+  // machine stuck OFFLINE in the DB even though it's actually connected
+  // (reproduced 2026-09-14: offline's handler does extra awaits after its
+  // upsert -- tournament lookup, 2 Redis calls, broadcast -- so its DB
+  // write can lose a race against online's single-await handler despite
+  // being received first). Chaining each machine's messages onto its own
+  // promise forces strictly-ordered processing per machine_id regardless
+  // of how much async work either branch does, without slowing down other
+  // machines' independent queues.
+  private messageQueues = new Map<string, Promise<unknown>>();
 
   constructor(
     private cfg: ConfigService,
@@ -77,9 +93,14 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
       this.client.subscribe('casino/machine/+/status');
     });
 
-    this.client.on('message', (topic, payload) =>
-      this.handleMessage(topic, payload),
-    );
+    this.client.on('message', (topic, payload) => {
+      const machineId = topic.split('/')[2];
+      const prev = this.messageQueues.get(machineId) ?? Promise.resolve();
+      const next = prev
+        .catch(() => {}) // one bad message must not wedge this machine's queue
+        .then(() => this.handleMessage(topic, payload));
+      this.messageQueues.set(machineId, next);
+    });
 
     this.client.on('error', (e) =>
       console.error('MQTT Gateway error:', e.message),

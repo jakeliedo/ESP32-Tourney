@@ -660,4 +660,112 @@
     đường gọi nào từ code SAS của mình chạm tới nó nữa → an toàn dù symbol
     vẫn có mặt trong binary.
 
+- **Phiên debug flash riêng trên máy `tech4`** (máy laptop cụ thể này, phân
+  biệt với "máy khác" đã flash thành công nói ở trên) — dành phần lớn thời
+  gian buổi chiều chỉ để tìm ra vì sao **chỉ máy này** liên tục báo
+  `No serial data received` / `Invalid head of packet` dù board+cáp+jumper
+  xác nhận ổn (đã flash được ở máy khác). Đã loại trừ lần lượt, theo đúng
+  thứ tự đã thử (để lần sau không lặp lại):
+  1. Cổng COM đổi số liên tục (COM6/7/9/12 cùng 1 adapter FTDI) — xác nhận
+     không phải nguyên nhân chính, chỉ là nhiễu phụ.
+  2. Driver FTDI — cài lại bản mới nhất từ FTDI, **không cải thiện gì**; đối
+     chiếu máy "khác" đang chạy driver còn cũ hơn (2012) mà vẫn ổn → driver
+     bị loại hoàn toàn khỏi danh sách nghi vấn.
+  3. Jumper điện áp 3.3V/5V trên adapter FTDI — xác nhận **luôn ở 3.3V**,
+     chưa từng đổi → loại trừ (khác nguyên nhân đã từng gặp 2026-09-05).
+  4. "VS Code crash khi mở terminal" hoá ra không phải crash thật — máy này
+     **không có PowerShell** (cả 5.1 lẫn 7, khả năng bị chính sách bảo mật
+     công ty gỡ chủ động) nên default terminal profile lỗi
+     `Path to shell executable ... powershell.exe does not exist`, và
+     Extension Host chỉ đang reload bình thường sau khi cài lại PlatformIO
+     IDE (log `exiting with code 0`, không phải crash). Fix: đổi default
+     terminal profile sang Git Bash/cmd.
+  5. **Baud rate — kết quả KHÁC với ghi chú trước đó trong mục cùng ngày ở
+     trên** (nơi ghi "thử cả 2 mức baud 921600 và 115200 — loại trừ nguyên
+     nhân baud rate" rồi chuyển sang máy khác): lần thử lại buổi chiều này,
+     hạ `upload_speed` từ `921600` (giá trị mặc định mới nhất commit
+     `1ea25be`) xuống `115200` **có** giúp flash thành công 2 lần liên tiếp
+     (trước đó toàn bộ ~10 lần thử ở 921600 đều fail). Tuy nhiên **không
+     phải fix triệt để** — vẫn còn nhiều lần fail xen kẽ ngay cả ở 115200
+     (~1/3 tỷ lệ thành công thực tế). Kết luận: baud thấp cải thiện tỷ lệ
+     thành công rõ rệt nhưng không giải quyết hết gốc rễ — nghi ngờ đặc thù
+     USB stack/latency của máy `tech4` (laptop công ty, có dấu hiệu bị
+     hardening bảo mật qua việc PowerShell bị gỡ) nhưng chưa xác nhận được.
+  - **Quyết định**: giữ `upload_speed = 115200` như **override cục bộ chỉ
+    cho máy `tech4`** (không commit lên git — giá trị chính thức trong repo
+    vẫn là `921600` theo `1ea25be`), kèm comment giải thích trong
+    `platformio.ini` để không ai vô tình commit đè lại.
+  - **Việc còn tồn đọng**: chưa xác định được nguyên nhân gốc thật của độ
+    không ổn định trên máy `tech4` — nếu gặp lại, ưu tiên dùng máy khác để
+    flash thay vì cố gắng debug thêm trên máy này.
+
+- **Kết quả bất ngờ sau lần flash thành công đầu tiên (115200) trên máy
+  `tech4`**: SAS với máy slot thật **tự nhiên phản hồi trở lại hoàn toàn**
+  sau đúng 3 ngày im lặng tuyệt đối (Redis/`mosquitto.log` đứng yên từ
+  2026-09-10 — đã xác nhận qua log thật, không phải suy đoán). Trước khi
+  flash, đã làm loopback tại V0259 (chập TXD↔RXD phía RS232) để loại trừ
+  board/dây — xác nhận board+V0259 hoàn toàn ổn (nhận lại đúng byte tự gửi),
+  khoanh vùng nghi vấn sang máy slot/cáp RS232. Nhưng ngay sau khi reset từ
+  lần flash thành công, log boot cho thấy Credits (LP 0x1A)/Meters/Machine
+  Identity (LP 0x54)/Denom (LP 0x1F) **đều phản hồi CRC hợp lệ ngay lập
+  tức**, không cần đụng gì tới dây RS232/máy slot cả.
+  - **Suy luận**: nhiều khả năng UART1 (hoặc trạng thái nội bộ liên quan)
+    bị "kẹt" từ lần boot trước đó (chạy liên tục 4 ngày, từ 2026-09-10) —
+    một lần reset/reboot hoàn toàn (EN pulse trong quy trình boot mode +
+    reset sau khi flash xong) đã giải phóng trạng thái kẹt này. Không phải
+    do máy slot tắt SAS hay dây RS232 hỏng như nghi ngờ suốt cả ngày.
+  - Chưa xác định được cơ chế "kẹt UART sau nhiều ngày uptime" cụ thể là gì
+    — nếu gặp lại hiện tượng SAS im lặng kéo dài trong tương lai, **thử
+    reset board trước** (không cần flash lại, chỉ cần reboot) trước khi đi
+    sâu vào nghi ngờ phần cứng máy slot/dây.
+
+- **Pull `origin/main` mới nhất** (`cdce524` → `b12a1fe`, fast-forward,
+  không conflict) ngay trong lúc đang debug — lấy về đúng bản fix crash
+  `%f`/`%.2f` mô tả ở mục trên. Build + flash thành công lên máy 01 tại máy
+  `tech4` (sau vài lần thử lại vì lý do baud/boot-mode ở trên) — xác nhận
+  board hiện đang chạy đúng HEAD mới nhất.
+
+- **Bug thật tìm thấy: máy 01 hiện "offline" giả trên control-panel dù SAS
+  đang giao tiếp bình thường** (xác nhận trực tiếp qua Serial Monitor:
+  Credits poll `01 1A 03 A6` → phản hồi CRC hợp lệ liên tục). Control-panel
+  lọc bỏ hẳn máy có `status=offline` khỏi bảng (`App.tsx`, nhiều chỗ dùng
+  `machines.filter(m => m.status.toLowerCase() !== 'offline')`) — đúng thiết
+  kế, không phải bug UI. Vấn đề thật nằm ở backend.
+  - **Nguyên nhân (race condition thật, đã xác nhận qua log Mosquitto)**:
+    `mqtt-gateway.service.ts` đăng ký
+    `this.client.on('message', (topic, payload) => this.handleMessage(topic, payload))`
+    — gọi `handleMessage()` (async) nhưng **không `await`**, và bản thân
+    thư viện `mqtt.js` cũng không đợi promise của listener trước khi bắn
+    message tiếp theo. Khi board reconnect nhanh (kiểu "session taken
+    over" — LWT `offline` của session cũ bị broker đẩy ra gần như đồng
+    thời với `online` thật của session mới), 2 lệnh gọi `handleMessage()`
+    chạy **song song, không đảm bảo thứ tự ghi DB**: nhánh `offline` có
+    thêm 4 bước `await` phụ sau khi `upsert` (query tournament active, 2
+    lệnh Redis, broadcast leaderboard) trong khi nhánh `online` chỉ có 1
+    `await upsert` rồi xong ngay — nên dù `online` đến sau `offline` theo
+    thời gian thực, `upsert(ONLINE)` có thể hoàn tất **trước**
+    `upsert(OFFLINE)` hoặc ngược lại một cách ngẫu nhiên, tuỳ độ trễ DB/
+    event loop lúc đó. Kết quả quan sát được: DB kẹt ở `offline` dù board
+    đang sống thật, và **không tự phục hồi** cho tới lần reconnect kế tiếp
+    (firmware chỉ publish lại "online" lúc reconnect, không có heartbeat
+    định kỳ nào khác).
+  - **Workaround tạm ngay lúc phát hiện**: gọi `POST
+    /api/machines/01/command {type:"ENABLE"}` để set thẳng status=ONLINE
+    thủ công — máy hiện lại trên control-panel ngay.
+  - **Fix thật (đã áp dụng, type-check pass)**: thêm
+    `messageQueues: Map<string, Promise<unknown>>` trong
+    `MqttGatewayService`, mọi message của cùng 1 `machine_id` giờ được
+    chain tuần tự (`prev.catch(()=>{}).then(() => handleMessage(...))`)
+    thay vì bắn song song — đảm bảo `handleMessage()` luôn xử lý **đúng thứ
+    tự message thực sự đến từ broker**, bất kể nhánh nào có nhiều `await`
+    phụ hơn nhánh kia. Chưa flash/deploy verify qua 1 lần reconnect thật sau
+    fix — cần theo dõi lần tới máy tự reconnect (ETH vẫn còn hiện tượng
+    "session taken over" định kỳ, xem mục 2026-09-13) để xác nhận DB không
+    còn kẹt offline nữa.
+  - **Ghi chú phụ, chưa điều tra**: lúc kiểm tra thấy `coin_in` nhảy lên
+    `46930500` (bất thường, có vẻ liên quan tới việc suy luận coin-in từ
+    Meters/Total-Coin-In sau khi SAS phục hồi) — chưa xác nhận đây là dữ
+    liệu thật từ máy hay lỗi tính toán, cần xem lại nếu gặp lại con số vô lý
+    tương tự.
+
 ---
