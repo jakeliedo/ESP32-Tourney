@@ -587,12 +587,40 @@
     `report_event()` khi exception **thay đổi** so với lần poll trước (áp
     dụng cho cả door open/close, handpay, và nhánh default) — máy có lặp
     lại `0x1F` bao nhiêu lần cũng chỉ log 1 lần đầu tiên.
-  - Build firmware OK. **Thử flash lên board thật thất bại**: esptool báo
-    `No serial data received` khi ở boot mode — nghi ngờ thao tác tay
-    GPIO9/EN chưa đúng nhịp hoặc tiếp xúc jumper kém. **Tạm dừng theo yêu
-    cầu người dùng, chưa flash xong** — việc còn dang dở cho lần sau: vào
-    lại boot mode đúng quy trình (xem mục "Quy trình vào Boot Mode" trong
-    `CLAUDE.md`) rồi `pio run -e eth01evo --target upload` ngay khi board
-    vừa sẵn sàng (đừng để trễ giữa 2 bước).
+  - Build firmware OK. **2 lần thử flash tại máy này đều thất bại**:
+    esptool báo `No serial data received` khi ở boot mode, kể cả sau khi
+    thử lại đúng quy trình (GPIO9/EN) và thử cả 2 mức baud (921600 và
+    115200 — loại trừ nguyên nhân baud rate). Cuối cùng **flash thành công
+    bằng máy tính khác**.
+
+  - **Sau khi flash: phát hiện board rơi vào vòng lặp reboot vô hạn**
+    (MQTT status online/offline lặp mỗi ~5s, credits luôn = 0). Xác nhận
+    `bv_enabled`/`printer_enabled` đã có trong telemetry (đúng code mới) và
+    fix dedup exception hoạt động đúng (chỉ còn 1 dòng `EXC 0x1F` mỗi chu
+    kỳ thay vì hàng chục lần/giây) — nhưng có bug MỚI, nghiêm trọng hơn.
+  - Bắt log serial trực tiếp qua COM7: crash **luôn tại đúng 1 điểm** —
+    ngay sau dòng log "Total Coin In meter (LP 0x11) CONFIRMED WORKING",
+    tức lần đầu tiên nhánh `ESP_LOGI(..., "Total Coin In: %lu ($%.2f)",
+    ...)` được thực thi sau mỗi lần cold-boot. `Guru Meditation Error:
+    Illegal instruction`.
+  - **Giải mã chính xác bằng `riscv32-esp-elf-addr2line`** trên file
+    `.elf` vừa build: cả `MEPC` (PC lúc crash) và `RA` đều trỏ vào
+    `_svfprintf_r` (lõi `vfprintf` của newlib) — xác nhận crash xảy ra
+    ngay trong lúc format chuỗi `%.2f`.
+  - **Nguyên nhân gốc**: `newlib nano` (thư viện C mặc định) **không link
+    phần xử lý số thực (`%f`/`%.2f`) trừ khi có cờ linker `-u
+    _printf_float`** — cờ này chưa từng có trong `platformio.ini`. Gọi
+    `%.2f` không lỗi lúc build, chỉ crash thật lúc chạy, đúng lần đầu tiên
+    nhánh đó thực thi. **Đây là lỗi tiềm ẩn có từ trước, không phải do fix
+    dedup exception** — mọi log dùng `%.2f` trong `sas_polling.cpp`
+    (credits đổi, handpay, meters, Total Coin In) đều là quả bom nổ chậm
+    tương tự, chỉ chưa ai kích hoạt đúng lúc có serial monitor gắn sẵn.
+  - **Fix**: thêm `-Wl,-u,_printf_float` vào `build_flags`
+    (`platformio.ini`, env `eth01evo`). Build lại pass (link thành công =
+    xác nhận symbol tồn tại trong newlib build này, đúng giả thuyết).
+  - **Việc còn dang dở**: đã build xong bản fix, **chưa flash lại** —
+    board vẫn đang kẹt trong vòng lặp reboot tại thời điểm ghi nhật ký
+    này. Cần flash lại (máy khác hoặc vào lại boot mode ở máy này) ngay
+    khi có thể.
 
 ---
