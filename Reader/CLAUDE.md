@@ -36,11 +36,29 @@ python sas_command_reader.py --selftest   # kiểm tra bảng tra cứu/offset, 
 
 ## Cách đấu dây (tap)
 
-Dùng **1 adapter USB-RS232↔TTL** (hoặc PL2303/FTDI tương tự) cắm vào PC:
+> **CẢNH BÁO (2026-09-16) — bản trước của mục này ghi sai, có thể LÀM HỎNG ADAPTER.**
+> Trước đây ghi "adapter USB-RS232↔TTL (hoặc PL2303/FTDI tương tự)" — **PL2303/FTDI
+> thường KHÔNG PHẢI RS232↔TTL converter**, chúng là USB↔TTL (chỉ chịu được mức
+> 0–3.3V/0–5V, đơn cực, logic KHÔNG đảo). Dây SAS thật là RS232 chuẩn (lưỡng cực
+> ±5V~±13V, logic ĐẢO — mark = điện áp âm = logic 1). Cắm thẳng chân RX của
+> FTDI/PL2303 vào dây RS232 thật có thể vượt điện áp chịu đựng của chip, làm hỏng
+> adapter, và dữ liệu đọc được (nếu adapter sống sót) sẽ sai hoàn toàn vì đảo logic.
+> **Bắt buộc phải qua một mạch RS232↔TTL converter thật (MAX3232 hoặc tương đương —
+> xem module V0259 đã dùng cho SAS UART1 của EVO board, mục "Nối dây V0259" trong
+> `../CLAUDE.md`) trước khi đưa tín hiệu vào chân RX của adapter USB-TTL.** Không có
+> mạch này thì tạm thời không thể tap được — đừng thử nối trực tiếp để "xem thử".
 
-- Nối **chỉ chân RX** của adapter vào đúng dây mang tín hiệu **TX của HOST** cần nghe
-  (dây này chính là chân **RX phía máy slot**, vì TX bên này = RX bên kia).
-- Nối GND chung giữa adapter và bus đang nghe.
+Dùng **1 mạch RS232↔TTL converter** (MAX3232 hoặc tương đương, ví dụ module V0259)
+ở giữa dây SAS thật và **1 adapter USB↔TTL** (FTDI/PL2303/CP2102...) cắm vào PC:
+
+```
+Dây SAS thật (RS232, ±5V~±13V)  →  [RS232↔TTL converter, vd MAX3232/V0259]  →  TTL (0–3.3V/5V)  →  RX của adapter USB↔TTL  →  PC
+```
+
+- Phía TTL ra khỏi converter: nối **chỉ chân RX** của adapter USB↔TTL vào đúng dây
+  mang tín hiệu **TX của HOST** cần nghe (dây này chính là chân **RX phía máy slot**,
+  vì TX bên này = RX bên kia) — tất nhiên đã qua converter, không phải nối thẳng.
+- Nối GND chung xuyên suốt: dây SAS thật ↔ converter ↔ adapter USB↔TTL.
 - **Tuyệt đối không nối chân TX của adapter vào đâu cả** — chỉ nghe, không phát, không
   can thiệp bus thật.
 

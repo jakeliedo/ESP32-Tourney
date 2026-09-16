@@ -985,4 +985,19 @@
   chia sẻ code). `GET /api/machines/logs` giờ gom log từng máy rồi merge,
   không nhận `limit` query nữa.
 
+- **`Reader/CLAUDE.md` (mục "Cách đấu dây") ghi sai, có thể LÀM HỎNG
+  ADAPTER — phát hiện và sửa ngay trong phiên khi người dùng chuẩn bị test
+  thật.** Bản gốc ghi "dùng 1 adapter USB-RS232↔TTL (hoặc PL2303/FTDI tương
+  tự)" — nhầm lẫn nghiêm trọng giữa 2 loại thiết bị khác nhau: PL2303/FTDI
+  thường là USB↔TTL (0–3.3V/5V, đơn cực, logic không đảo), **không phải**
+  RS232↔TTL converter. Dây SAS thật là RS232 chuẩn (lưỡng cực ±5V~±13V,
+  logic đảo). Cắm thẳng chân RX của FTDI/PL2303 vào dây RS232 thật có thể
+  vượt điện áp chịu đựng của chip, làm hỏng adapter — chưa kể dữ liệu đọc
+  được (nếu sống sót) sẽ sai vì đảo logic. **Fix**: viết lại rõ ràng, bắt
+  buộc phải có mạch RS232↔TTL converter thật (MAX3232/module V0259 — đúng
+  loại project đã dùng cho SAS UART1 của EVO board) đặt giữa dây SAS và
+  adapter USB↔TTL, không được nối thẳng. Người dùng xác nhận đang chờ mạch
+  chuyển đổi này về mới test thật được — tool `sas_command_reader.py` tự
+  thân không có vấn đề (self-test vẫn PASS), chỉ tài liệu đấu dây sai.
+
 ---
