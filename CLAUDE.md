@@ -96,6 +96,9 @@ ESP32-Tourney/
 ├── backend/                    # NestJS — không đổi so với nhánh main
 ├── frontend/                   # React — không đổi so với nhánh main
 ├── sim_esp32.py                # Simulator MQTT
+├── Reader/                     # Passive SAS sniffer cho HOST THẬT khác (không phải EVO) — xem Reader/CLAUDE.md
+│   ├── CLAUDE.md                # Cách đấu dây tap, cách chạy, giới hạn đã biết
+│   └── sas_command_reader.py    # Đọc lệnh Long Poll + tên/tham số, port bảng CRC/lệnh từ firmware/src/sas/
 ├── mosquitto/config/mosquitto.conf
 ├── docker-compose.yml
 └── hardware/wiring_guide.txt
@@ -223,6 +226,14 @@ docker-compose logs -f backend
 ```bash
 pip install paho-mqtt
 python sim_esp32.py
+```
+
+### Reader — đọc lệnh SAS của một host thật khác (không phải EVO)
+```bash
+cd Reader
+pip install pyserial
+python sas_command_reader.py COM8              # xem chi tiết cách đấu dây tap trong Reader/CLAUDE.md
+python sas_command_reader.py --selftest        # kiểm tra bảng tra cứu, không cần phần cứng
 ```
 
 ---
