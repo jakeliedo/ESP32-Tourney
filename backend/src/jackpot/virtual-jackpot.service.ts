@@ -33,13 +33,17 @@ import { LeaderboardGateway } from '../device-gateway/leaderboard.gateway';
 import { TournamentEntity, TournamentStatus } from '../database/entities/tournament.entity';
 import { JackpotHitEntity } from '../database/entities/jackpot_hit.entity';
 
+const TICK_INTERVAL_SEC = 2;   // matches the setInterval() below
+const RAMP_WINDOW_SEC   = 6;   // start nudging pool toward `min` this many seconds before a scheduled hit
+
 @Injectable()
 export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
   private ticker: ReturnType<typeof setInterval> | null = null;
 
   private enabled       = false;
-  private floor         = 10000;   // credits = $100.00
-  private ceiling       = 30000;   // credits = $300.00
+  private initial       = 10000;   // credits = $100.00 -- pool value right after a reset
+  private min           = 10000;   // credits = $100.00 -- minimum payout a hit can be clamped up to
+  private max           = 30000;   // credits = $300.00 -- maximum payout a hit can be clamped down to
   private tickIncrement = 5;       // per-tick CAP -- actual increment is random(1..this) each tick
   private numHits       = 1;       // guaranteed jackpot hits per round
 
@@ -54,7 +58,7 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit(): Promise<void> {
     await this.loadConfig();
-    this.ticker = setInterval(() => this.tick().catch(() => {}), 2000);
+    this.ticker = setInterval(() => this.tick().catch(() => {}), TICK_INTERVAL_SEC * 1000);
   }
 
   onModuleDestroy(): void {
@@ -64,27 +68,33 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
   // ── Called by controller when operator configures the engine ─
 
   async configure(
-    floor: number,
-    ceiling: number,
+    initial: number,
+    min: number,
+    max: number,
     tickIncrement: number,  // max credits added per 2s tick
     numHits: number,        // guaranteed jackpot hits per round
     enabled: boolean,
   ): Promise<void> {
-    this.floor         = Math.max(1, Math.floor(floor));
-    this.ceiling       = Math.max(this.floor + 1, Math.floor(ceiling));
+    this.min           = Math.max(1, Math.floor(min));
+    this.max            = Math.max(this.min + 1, Math.floor(max));
+    // initial is where the pool starts/resets to -- capped at `min` so a hit
+    // can never fire below its own configured floor on the first tick of a
+    // round (it's meant to climb INTO [min, max] from there, not start there).
+    this.initial        = Math.max(1, Math.min(Math.floor(initial), this.min));
     this.tickIncrement = Math.max(1, Math.round(tickIncrement));
     this.numHits       = Math.max(1, Math.round(numHits));
     this.enabled       = enabled;
 
-    await this.redis.set('vjp:floor',          String(this.floor));
-    await this.redis.set('vjp:ceiling',        String(this.ceiling));
+    await this.redis.set('vjp:initial',        String(this.initial));
+    await this.redis.set('vjp:min',            String(this.min));
+    await this.redis.set('vjp:max',            String(this.max));
     await this.redis.set('vjp:tick_increment', String(this.tickIncrement));
     await this.redis.set('vjp:num_hits',       String(this.numHits));
     await this.redis.set('vjp:enabled',        enabled ? 'true' : 'false');
 
     if (enabled) {
-      await this.redis.set('vjp:pool', String(this.floor));
-      this.leaderboard.broadcastJackpotPool(this.floor);
+      await this.redis.set('vjp:pool', String(this.initial));
+      this.leaderboard.broadcastJackpotPool(this.initial);
       // Don't draw a schedule here -- at configure() time (called right
       // before a tournament is created, see App.tsx's handleStart()) we
       // don't yet reliably know the round's real started_at/duration_seconds.
@@ -95,9 +105,9 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  getConfig(): { floor: number; ceiling: number; tickIncrement: number; numHits: number; enabled: boolean } {
+  getConfig(): { initial: number; min: number; max: number; tickIncrement: number; numHits: number; enabled: boolean } {
     return {
-      floor: this.floor, ceiling: this.ceiling,
+      initial: this.initial, min: this.min, max: this.max,
       tickIncrement: this.tickIncrement, numHits: this.numHits,
       enabled: this.enabled,
     };
@@ -105,20 +115,22 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
 
   async getPool(): Promise<number> {
     const v = await this.redis.get('vjp:pool');
-    return v ? Math.round(parseFloat(v)) : this.floor;
+    return v ? Math.round(parseFloat(v)) : this.initial;
   }
 
   // ── Internal helpers ─────────────────────────────────────────
 
   private async loadConfig(): Promise<void> {
     const en = await this.redis.get('vjp:enabled');
-    const f  = await this.redis.get('vjp:floor');
-    const c  = await this.redis.get('vjp:ceiling');
+    const i  = await this.redis.get('vjp:initial');
+    const mn = await this.redis.get('vjp:min');
+    const mx = await this.redis.get('vjp:max');
     const ti = await this.redis.get('vjp:tick_increment');
     const nh = await this.redis.get('vjp:num_hits');
     this.enabled       = en === 'true';
-    if (f)  this.floor         = parseInt(f);
-    if (c)  this.ceiling       = parseInt(c);
+    if (i)  this.initial       = parseInt(i);
+    if (mn) this.min           = parseInt(mn);
+    if (mx) this.max           = parseInt(mx);
     if (ti) this.tickIncrement = parseInt(ti);
     if (nh) this.numHits       = parseInt(nh);
   }
@@ -133,7 +145,12 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
       where: { status: TournamentStatus.ACTIVE },
       order: { id: 'DESC' },
     });
-    if (!active) return;
+    if (!active) {
+      // Round just ended/was cancelled with guaranteed hits still pending --
+      // see JackpotService.forceFireRemaining() for why this exists.
+      await this.forceFireRemaining();
+      return;
+    }
 
     // ── Round detection: draw a fresh, time-constrained hit schedule the
     // first tick that sees THIS tournament id as active (new round, or
@@ -144,7 +161,7 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
     let hitIdx: number;
 
     if (armedId !== String(active.id)) {
-      pool    = this.floor;
+      pool    = this.initial;
       targets = this.scheduleTargets(active.duration_seconds);
       hitIdx  = 0;
       await this.redis.set('vjp:armed_tournament_id', String(active.id));
@@ -154,7 +171,7 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
       this.leaderboard.broadcastJackpotPool(pool);
     } else {
       const poolStr = await this.redis.get('vjp:pool');
-      pool = poolStr ? parseFloat(poolStr) : this.floor;
+      pool = poolStr ? parseFloat(poolStr) : this.initial;
       const targetsStr = await this.redis.get('vjp:targets');
       targets = targetsStr ? JSON.parse(targetsStr) : [];
       const idxStr = await this.redis.get('vjp:hit_idx');
@@ -164,24 +181,31 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
     // Random per-tick increment capped at tickIncrement -- deliberately
     // irregular so the displayed number doesn't look mechanically fixed.
     const inc = 1 + Math.floor(Math.random() * this.tickIncrement);
-    pool = Math.min(pool + inc, this.ceiling);
+    pool = Math.min(pool + inc, this.max);
 
     if (hitIdx < targets.length && active.started_at) {
       const elapsedSec = (Date.now() - new Date(active.started_at).getTime()) / 1000;
+
+      // Nudge pool toward `min` in the final stretch before a scheduled
+      // hit -- see JackpotService.checkSchedule() for the full rationale
+      // (a time-based trigger can otherwise fire while the displayed pool
+      // is still well below `min`, forcing the payout up from a visibly
+      // much lower number).
+      const timeUntilHit = targets[hitIdx] - elapsedSec;
+      if (timeUntilHit > 0 && timeUntilHit <= RAMP_WINDOW_SEC) {
+        const deficit = this.min - pool;
+        if (deficit > 0) {
+          const ticksRemaining = Math.max(1, Math.ceil(timeUntilHit / TICK_INTERVAL_SEC));
+          pool = Math.min(pool + deficit / ticksRemaining, this.max);
+        }
+      }
+
       if (elapsedSec >= targets[hitIdx]) {
         const rankings = await this.redis.getLeaderboard(active.id);
         const winner   = rankings[0]?.machineId ?? 'VIRTUAL';
-        const amount   = Math.round(Math.max(pool, this.floor));
-        console.log(`🎰 Virtual Jackpot HIT — ${winner}: $${(amount / 100).toFixed(2)}`);
-        await this.jackpotHits.save({
-          machine_id:    winner,
-          amount,
-          tournament_id: active.id,
-          session_id:    active.session_id ?? null,
-        });
-        const videoUrl = await this.redis.get('vjp:video_url');
-        this.leaderboard.broadcastJackpotHit(winner, amount, videoUrl || null);
-        pool = this.floor;
+        const amount   = Math.round(Math.min(Math.max(pool, this.min), this.max));
+        await this.fireHit(winner, amount, active.id, active.session_id ?? null);
+        pool = this.initial;
         hitIdx += 1;
         await this.redis.set('vjp:hit_idx', String(hitIdx));
       }
@@ -189,6 +213,71 @@ export class VirtualJackpotService implements OnModuleInit, OnModuleDestroy {
 
     await this.redis.set('vjp:pool', String(pool));
     this.leaderboard.broadcastJackpotPool(Math.round(pool));
+  }
+
+  // Safety net mirroring JackpotService.forceFireRemaining(): a round can
+  // end NATURALLY (timer runs out) with fewer than `numHits` scheduled
+  // targets actually crossed (real active window closes a tick early). Fire
+  // whatever's still pending now, clamped into [min, max], instead of
+  // silently losing the commitment.
+  //
+  // Does NOT apply to a manually-STOPped (CANCELLED) round -- see
+  // JackpotService.forceFireRemaining()'s comment; resetForCancelledRound()
+  // below clears `vjp:armed_tournament_id` synchronously from cancel()
+  // before this ever runs.
+  private async forceFireRemaining(): Promise<void> {
+    const armedId = await this.redis.get('vjp:armed_tournament_id');
+    if (!armedId) return;
+
+    const targetsStr = await this.redis.get('vjp:targets');
+    const targets: number[] = targetsStr ? JSON.parse(targetsStr) : [];
+    const idxStr = await this.redis.get('vjp:hit_idx');
+    let hitIdx = idxStr ? parseInt(idxStr) : 0;
+    if (hitIdx >= targets.length) return;
+
+    const tournamentId = parseInt(armedId);
+    const poolStr = await this.redis.get('vjp:pool');
+    const pool    = poolStr ? parseFloat(poolStr) : this.initial;
+    const amount  = Math.round(Math.min(Math.max(pool, this.min), this.max));
+    const rankings = await this.redis.getLeaderboard(tournamentId);
+    const winner   = rankings[0]?.machineId ?? 'VIRTUAL';
+
+    while (hitIdx < targets.length) {
+      await this.fireHit(winner, amount, tournamentId, null);
+      hitIdx += 1;
+    }
+    await this.redis.set('vjp:hit_idx', String(hitIdx));
+    await this.redis.set('vjp:pool', String(this.initial));
+    this.leaderboard.broadcastJackpotPool(this.initial);
+  }
+
+  // Called synchronously by TournamentService.cancel() right after a manual
+  // STOP -- see JackpotService.resetForCancelledRound() for the full
+  // rationale (immediate visual reset + prevents forceFireRemaining() from
+  // paying out a jackpot for a cancelled round).
+  async resetForCancelledRound(tournamentId: number): Promise<void> {
+    const armedId = await this.redis.get('vjp:armed_tournament_id');
+    if (armedId !== String(tournamentId)) return;
+
+    await this.redis.set('vjp:pool', String(this.initial));
+    await this.redis.del('vjp:armed_tournament_id');
+    await this.redis.del('vjp:targets');
+    await this.redis.del('vjp:hit_idx');
+    this.leaderboard.broadcastJackpotPool(this.initial);
+  }
+
+  private async fireHit(
+    machineId: string, amount: number, tournamentId: number, sessionId: string | null,
+  ): Promise<void> {
+    console.log(`🎰 Virtual Jackpot HIT — ${machineId}: $${(amount / 100).toFixed(2)}`);
+    await this.jackpotHits.save({
+      machine_id:    machineId,
+      amount,
+      tournament_id: tournamentId,
+      session_id:    sessionId,
+    });
+    const videoUrl = await this.redis.get('vjp:video_url');
+    this.leaderboard.broadcastJackpotHit(machineId, amount, videoUrl || null);
   }
 
   // `numHits` independent random target times (elapsed seconds from round

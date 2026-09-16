@@ -7,9 +7,10 @@ import { TournamentController } from './tournament.controller';
 import { DatabaseModule } from '../database/database.module';
 import { RedisModule } from '../redis/redis.module';
 import { DeviceGatewayModule } from '../device-gateway/device-gateway.module';
+import { JackpotModule } from '../jackpot/jackpot.module';
 
 @Module({
-  imports: [DatabaseModule, RedisModule, DeviceGatewayModule],
+  imports: [DatabaseModule, RedisModule, DeviceGatewayModule, JackpotModule],
   providers: [TournamentService],
   controllers: [TournamentController],
   exports: [TournamentService],

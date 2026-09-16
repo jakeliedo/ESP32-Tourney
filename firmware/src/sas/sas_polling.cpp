@@ -843,6 +843,52 @@ static bool set_ticket_printing(bool allow) {
     return true;
 }
 
+// ── Persistent bill-acceptor enable (LP 0x08) ─────────────────────
+
+/**
+ * Configure the bill validator to stay enabled after each accepted bill,
+ * instead of the SAS 6.02 default (machine auto-disables it after every
+ * single bill, requiring the host to resend LP 0x06 each time). Long Poll
+ * 08 "Configure Bill Denominations" (Section 7.5, Table 7.5) is the real
+ * mechanism for this -- LP 0x06/0x07 (Enable/Disable Bill Acceptor) only
+ * flip the on/off state and don't touch this behavior at all.
+ *   - denom_mask = 0xFFFFFFFF: accept every denomination the machine's own
+ *     BV hardware supports. This call is only about the "stay enabled"
+ *     behavior, not about restricting which bills are accepted, so it
+ *     preserves the same unrestricted acceptance plain LP 0x06 already had
+ *     (the exact per-bit denomination table in Table 7.5 is currency-
+ *     specific and not needed here since nothing should be restricted).
+ *   - action_flags = SAS_BILL_ACTION_KEEP_ENABLED (bit0=1): the actual
+ *     "don't require a fresh LP 0x06 per bill" behavior requested.
+ * Response is a bare Type S ACK (1-byte address echo, same as LP 0x06/07),
+ * not a parsed status frame.
+ * Spec caveat (right under Table 7.5): "The gaming machine may be
+ * configured to ignore bills regardless of this message" -- the operator
+ * menu can still override this even when the call succeeds.
+ * This is a persistent machine-side config write, not a continuously-held
+ * state (same as LP 0x7B, see set_ticket_printing()) -- sent once whenever
+ * the bill validator gets enabled (CMD_ENABLE / CMD_ENABLE_BV), not resent
+ * every poll cycle.
+ * UNVERIFIED ON REAL HARDWARE as of 2026-09-16 -- confirm the bill
+ * validator genuinely stops requiring a fresh LP 0x06 per bill before
+ * relying on this in production.
+ */
+static bool configure_bill_persistent_enable() {
+    uint8_t frame[11];
+    size_t frame_len = sas_build_lp_configure_bill(frame, g_machine_id,
+                                                    0xFFFFFFFFUL, SAS_BILL_ACTION_KEEP_ENABLED);
+    sas_send_frame(frame, frame_len);
+    uint8_t resp[1];
+    size_t n = sas_receive(resp, 1, SAS_LONG_POLL_TIMEOUT);
+    bool acked = (n == 1 && resp[0] == g_machine_id);
+    if (acked) {
+        ESP_LOGI(TAG, "LP 0x08: bill acceptor configured to stay enabled after each bill");
+    } else {
+        ESP_LOGW(TAG, "LP 0x08 (configure bill persistent-enable): no ACK (n=%d)", (int)n);
+    }
+    return acked;
+}
+
 // ── Recovery on boot: check if a pending AFT exists in NVS ────
 
 static void recover_pending_aft() {
@@ -1037,12 +1083,18 @@ void sas_polling_task(void* pvParameters) {
                 case CMD_ENABLE:
                     execute_simple_command(SAS_CMD_STARTUP);
                     vTaskDelay(pdMS_TO_TICKS(40));
-                    if (execute_simple_command(SAS_CMD_ENABLE_BILL)) s_bv_enabled = true;
+                    if (execute_simple_command(SAS_CMD_ENABLE_BILL)) {
+                        s_bv_enabled = true;
+                        configure_bill_persistent_enable();
+                    }
                     s_state = SLOT_STATE_IDLE;
                     ESP_LOGI(TAG, "ENABLE: LP 0x02 + LP 0x06 sent");
                     break;
                 case CMD_ENABLE_BV:
-                    if (execute_simple_command(SAS_CMD_ENABLE_BILL)) s_bv_enabled = true;
+                    if (execute_simple_command(SAS_CMD_ENABLE_BILL)) {
+                        s_bv_enabled = true;
+                        configure_bill_persistent_enable();
+                    }
                     ESP_LOGI(TAG, "ENABLE_BV: LP 0x06 sent (acked=%d)", s_bv_enabled);
                     break;
                 case CMD_DISABLE_BV:
@@ -1186,6 +1238,27 @@ void sas_polling_task(void* pvParameters) {
                     }
 
                     last_credits = cr_cents;
+                }
+
+                // Telemetry used to only get re-published via the Meters
+                // (LP 0xAF) success path below, every ~1s -- but not every
+                // machine responds to 0xAF (confirmed on at least one real
+                // EGT unit, see CLAUDE.md SAS debug log). On such a machine,
+                // once the initial connect-time telemetry burst went out,
+                // NOTHING ever queued another one again: General Poll/Credits
+                // kept succeeding fine (SAS link healthy), but with no new
+                // exception and no Meters response, report_event() was never
+                // called again -- board looked dead in the DB/control-panel
+                // indefinitely despite SAS working the whole time (found
+                // 2026-09-16). Fire an independent heartbeat here, gated on
+                // the credits poll succeeding (every 200ms) instead of on
+                // Meters, throttled to ~1s so it doesn't flood MQTT.
+                static uint8_t credits_heartbeat_tick = 0;
+                if (++credits_heartbeat_tick >= 5) {  // every 5 credits-poll cycles (~1s)
+                    credits_heartbeat_tick = 0;
+                    report_event(SAS_EXC_NO_ACTIVITY, last_credits,
+                                 real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                                 last_coin_out, 0, NULL);
                 }
             } else {
                 ESP_LOGW(TAG, "Credits poll: response CRC/parse error (n=%d)", (int)n);

@@ -42,6 +42,8 @@ import { RoundResultEntity } from '../database/entities/round_result.entity';
 import { RedisService } from '../redis/redis.module';
 import { MqttGatewayService } from '../device-gateway/mqtt-gateway.service';
 import { LeaderboardGateway } from '../device-gateway/leaderboard.gateway';
+import { JackpotService } from '../jackpot/jackpot.service';
+import { VirtualJackpotService } from '../jackpot/virtual-jackpot.service';
 
 export interface CreateTournamentDto {
   name: string;
@@ -68,6 +70,8 @@ export class TournamentService {
     private redis: RedisService,
     private mqtt: MqttGatewayService,
     private leaderboard: LeaderboardGateway,
+    private jackpot: JackpotService,
+    private virtualJackpot: VirtualJackpotService,
   ) {}
 
   async create(dto: CreateTournamentDto): Promise<TournamentEntity> {
@@ -196,6 +200,17 @@ export class TournamentService {
       { status: TournamentStatus.CANCELLED, ended_at: new Date() },
     );
     if (!flip.affected) return;
+
+    // Reset whichever jackpot engine is armed for this round immediately --
+    // a manual STOP pays out no results (see loop below saving nothing),
+    // and the jackpot pool shouldn't be an exception: without this it stays
+    // frozen at whatever it last showed for up to 2s, and worse, the next
+    // tick's forceFireRemaining() safety net would otherwise mistake this
+    // cancelled round for a naturally-finished one and pay out a jackpot
+    // for it (found 2026-09-16). Both are no-ops if this round's jackpot
+    // engine wasn't armed (e.g. jackpot never configured this round).
+    await this.jackpot.resetForCancelledRound(id);
+    await this.virtualJackpot.resetForCancelledRound(id);
 
     const t = await this.findOne(id);
 

@@ -17,16 +17,18 @@ import { RedisService } from '../redis/redis.module';
 import { JackpotHitEntity } from '../database/entities/jackpot_hit.entity';
 
 interface VirtualJackpotConfigDto {
-  floor: number;          // credits (e.g. 10000 = $100.00)
-  ceiling: number;        // credits (e.g. 30000 = $300.00)
+  initial: number;        // credits -- pool value right after a reset
+  min: number;            // credits -- minimum payout a hit can be clamped up to
+  max: number;            // credits -- maximum payout a hit can be clamped down to
   tickIncrement: number;  // max credits added per 2s tick (actual is random 1..this)
   numHits: number;        // guaranteed jackpot hits per round
   enabled: boolean;
 }
 
 interface RealJackpotConfigDto {
-  floor: number;    // credits
-  ceiling: number;  // credits
+  initial: number;  // credits -- pool value right after a reset
+  min: number;      // credits -- minimum payout a hit can be clamped up to
+  max: number;      // credits -- maximum payout a hit can be clamped down to
   rate: number;     // percentage (e.g. 0.5 = 0.5%)
   numHits: number;  // guaranteed jackpot hits per round
 }
@@ -65,7 +67,7 @@ export class JackpotController {
 
   @Post('config')
   async setRealConfig(@Body() dto: RealJackpotConfigDto) {
-    await this.svc.configure(dto.floor, dto.ceiling, dto.rate, dto.numHits);
+    await this.svc.configure(dto.initial, dto.min, dto.max, dto.rate, dto.numHits);
     return { ok: true };
   }
 
@@ -93,7 +95,7 @@ export class JackpotController {
 
   @Post('virtual/config')
   async setVirtualConfig(@Body() dto: VirtualJackpotConfigDto) {
-    await this.vjp.configure(dto.floor, dto.ceiling, dto.tickIncrement, dto.numHits, dto.enabled);
+    await this.vjp.configure(dto.initial, dto.min, dto.max, dto.tickIncrement, dto.numHits, dto.enabled);
     return { ok: true };
   }
 

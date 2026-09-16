@@ -843,3 +843,146 @@
     cần giải thích lại từ đầu.
 
 ---
+
+## 2026-09-16 (Thứ 4)
+
+- **PATH hệ thống máy `tech4` bị hỏng từ chính phiên 2026-09-14 — phát hiện
+  và sửa hôm nay.** Lệnh `setx PATH "%PATH%;C:\Program Files\PowerShell\7"
+  /M` chạy trực tiếp qua Git Bash (không qua `cmd.exe`) khiến `%PATH%`
+  KHÔNG được shell thay thế thành danh sách thư mục thật — bị ghi **nguyên
+  văn chữ `%PATH%`** vào registry Machine PATH, mỗi lần chạy lại setx sau đó
+  càng cộng dồn lỗi (PowerShell 7 bị lặp lại nhiều lần trong PATH). Hậu quả:
+  `npm`/`node`/`python`/VS Code CLI/`wmic` biến mất khỏi PATH của mọi tiến
+  trình mới — phát hiện khi `npm run dev` (leaderboard) báo "npm: command
+  not found" dù thư mục nodejs vẫn còn nguyên trên đĩa.
+  - **Fix**: tái tạo lại PATH gốc dựa trên giá trị `echo $PATH` ghi nhận
+    được đầu phiên 2026-09-14 (trước khi bị hỏng), ghi lại bằng `reg add`
+    (không dùng `setx` để tránh lặp lại đúng lỗi cũ) — bị chính permission
+    classifier của Claude Code chặn lần đầu ("Irreversible Local
+    Destruction"), phải hỏi lại người dùng xác nhận rồi mới ghi được.
+  - Vì `reg add` không tự broadcast `WM_SETTINGCHANGE` (khác `setx`), phải
+    tự gọi `SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, ...)` qua
+    PowerShell để các app mới mở nhận đúng giá trị ngay, không cần
+    logoff/reboot.
+  - **Bài học cho lần sau**: KHÔNG BAO GIỜ gọi `setx VAR "%VAR%;..."` trực
+    tiếp từ Git Bash/POSIX shell — `%VAR%` là cú pháp cmd.exe, không tồn
+    tại trong bash, nên bị truyền nguyên văn. Nếu cần nối thêm PATH qua
+    `setx` từ bash, phải bọc qua `cmd.exe /c "setx PATH %PATH%;..."` để
+    chính cmd.exe làm phép thay thế, hoặc tính toán giá trị đầy đủ trước
+    rồi `reg add` thẳng (an toàn hơn, không phụ thuộc shell nào expand gì).
+
+- **Backend/control-panel/leaderboard hoá ra đã chạy sẵn dưới dạng Windows
+  Service qua NSSM** (`ESP32Tourney-Backend`, `ESP32Tourney-ControlPanel`,
+  cả 2 cấu hình chạy `npm run start:dev`/`npm run dev` — tức vẫn là dev
+  watch-mode, tự recompile khi sửa file, chỉ khác là được NSSM quản lý vòng
+  đời + redirect log ra `service.log`). Chỉ thiếu leaderboard (`:5174`),
+  khởi động thủ công bằng `npm run dev`.
+
+- **Bug thật tìm thấy: control-panel không thấy board dù SAS đang đọc dữ
+  liệu thật (COM7 xác nhận có traffic).** Điều tra qua `mosquitto_sub` +
+  log broker (`C:\Program Files\mosquitto\log\mosquitto.log`, `log_type
+  all`) thấy rõ: board publish `status=online` → gần như ngay sau đó,
+  `casino/machine/01/telemetry` đầu tiên (lúc board vừa connect, SAS chưa
+  kịp sync xong) mang `state=0` (`SLOT_STATE_INIT`) → `processTelemetry()`
+  trong `mqtt-gateway.service.ts` tự ý ghi đè `status` DB theo
+  `stateToStatus(data.state)`, và bảng map cũ có `0: MachineStatus.OFFLINE`
+  — ghi đè NGAY status vừa nhận "online" xuống "offline", dù bản thân việc
+  NHẬN ĐƯỢC telemetry đã chứng minh máy đang kết nối.
+  - **Fix**: đổi `stateToStatus()` map `0` (INIT) → `ONLINE` thay vì
+    `OFFLINE` — INIT là "đang khởi tạo, vẫn kết nối", không phải "mất kết
+    nối".
+  - **Bug thứ 2 liên quan, nghiêm trọng hơn**: sau lần telemetry đầu đó,
+    board hoàn toàn im lặng suốt ~27 phút dù SAS vẫn poll tốt (COM7 xác
+    nhận). Nguyên nhân: telemetry chỉ publish qua `report_event()`, và
+    trong `sas_polling.cpp` chỉ có DUY NHẤT 1 chỗ gọi `report_event()`
+    KHÔNG ĐIỀU KIỆN — nhánh Meters (LP 0xAF) thành công, chạy mỗi ~1s. Máy
+    này (như máy EGT từng gặp trong phiên 2026-09 debug SAS) không hỗ trợ
+    LP 0xAF, nên nhánh đó không bao giờ chạy → không gì kích hoạt publish
+    lại nữa, dù Credits/General Poll vẫn chạy hoàn hảo.
+  - **Fix**: thêm heartbeat độc lập gắn vào chu kỳ Credits poll (chạy mỗi
+    ~200ms, không phụ thuộc Meters có được hỗ trợ hay không), throttle
+    còn ~1 lần/giây bằng counter riêng — đảm bảo telemetry luôn publish lại
+    định kỳ bất kể máy có trả lời LP 0xAF hay không.
+  - Cả 2 fix build + flash lên board thật, verify qua `mosquitto_sub` thấy
+    telemetry publish liên tục ~1s/lần với `state:1`, và
+    `GET /api/machines` trả về `status:"online"` đúng.
+
+- **Redesign Jackpot: tách `floor` cũ thành `initial`/`min`/`max`, thêm
+  ramp trước khi rớt, fix bug STOP làm rớt jackpot ngoài ý muốn.** Chi tiết
+  đầy đủ (nguyên nhân, code, quyết định thiết kế qua hỏi đáp trực tiếp với
+  người dùng) đã ghi trong `CLAUDE.md` mục **"Jackpot: initial/min/max,
+  ramp, reset-on-cancel (2026-09-16)"** — không lặp lại ở đây, chỉ tóm tắt:
+  - `initial` (điểm reset) tách khỏi `min` (sàn trả thưởng) — trước đây
+    dùng chung 1 biến `floor`.
+  - Thêm "ramp": 6 giây cuối trước mốc rớt đã lên lịch (trigger vẫn theo
+    thời gian, không đổi), nếu pool chưa chạm `min` thì chủ động đẩy nhanh
+    lên cho khớp — tránh tình trạng số hiển thị còn thấp mà hệ thống báo
+    rớt cao hơn hẳn (phát hiện khi người dùng hỏi thẳng "vì sao số jackpot
+    chưa chạy đến giá trị sàn nhưng lại báo rớt ở giá trị đó").
+  - **Bug tự mình gây ra rồi tự sửa trong cùng phiên**: safety-net
+    `forceFireRemaining()` (thêm trước đó cùng phiên để đảm bảo đủ
+    `numHits`/round) không phân biệt round hết giờ tự nhiên với round bị
+    Cancel (STOP thủ công) — cả 2 đều làm rớt jackpot, vi phạm nguyên tắc
+    "STOP không tính kết quả". Người dùng tự phát hiện qua quan sát thực tế
+    ("nó vẫn chạy khi nhấn stop trên control panel"). Fix bằng
+    `resetForCancelledRound()` gọi đồng bộ ngay trong `cancel()`.
+  - **Việc dọn dẹp phát sinh**: phát hiện tournament #51 còn "active" sót
+    lại từ ~30 phút trước (test trước đó không tắt đúng cách) — vẫn khiến
+    jackpot tick chạy dù chưa bấm START ở phiên hiện tại. Cancel thủ công
+    qua đúng API (`POST /api/tournaments/51/cancel`) để dọn sạch, không sửa
+    DB trực tiếp.
+
+- **Odometer digit-reel cho số jackpot (leaderboard + control-panel) — 2
+  lần thử mới ra đúng hiệu ứng.** Yêu cầu người dùng: số phải "cuộn" mượt
+  như đồng hồ km xe hơi/bánh xe slot machine thật.
+  - **Lần 1 (sai, gây giật)**: dùng CSS `transition` bật mỗi khi số đổi,
+    kết hợp `useSmoothedPoolValue` (nội suy `requestAnimationFrame` phía
+    trên, ~60 lần/giây) → mỗi lần giá trị nội suy nhích lên là 1 lần HỦY
+    transition cũ đang chạy dở + bắt đầu lại → giật/twitch, ngược hoàn
+    toàn với "mượt" yêu cầu.
+  - **Fix đúng (lần 2)**: bỏ hẳn cơ chế trigger-transition-khi-đổi-số. Vị
+    trí cuộn mỗi ô số giờ là **hàm liên tục** của giá trị hiện tại:
+    `pos = (cents / 10^exponent) % 10` — không có gì để "restart" nữa, mỗi
+    khung hình chỉ vẽ đúng vị trí phép tính cho ra ngay lúc đó. Bài học rút
+    ra: khi nguồn dữ liệu đã tự nội suy liên tục (nhiều update/giây), đừng
+    dùng cơ chế animation kiểu "trigger theo sự kiện rời rạc" (CSS
+    transition, hay bất kỳ animate-on-change nào) — nó sẽ tự đánh nhau với
+    chính nó. Nên biểu diễn animation như hàm thuần túy của thời gian/giá
+    trị, không phải chuỗi sự kiện.
+  - `useSmoothedPoolValue` tự nó dùng kỹ thuật "trễ lại đúng 1 chu kỳ tick"
+    (interpolation-with-buffer, giống networked games): replay lại delta
+    của chu kỳ TRƯỚC đó trải đều trong chu kỳ hiện tại, luôn có đích để
+    cuộn tới thay vì đứng yên rồi giật mỗi 2s.
+  - File mới: `OdometerAmount.tsx` + `useSmoothedPoolValue.ts`
+    (leaderboard), `JackpotOdometer.tsx` + `useSmoothedPoolValue.ts`
+    (control-panel, cố ý trùng lặp — 2 app frontend độc lập, không có
+    package chung). Control-panel giờ cũng nghe `jackpot_pool_update`
+    (trước đây chỉ leaderboard), hiện ở góc phải header cùng hàng "SLOT
+    TOURNAMENT".
+
+- **Firmware: thêm LP 0x08 "Configure Bill Denominations" để BV giữ enable
+  liên tục, không cần bấm lại sau mỗi tờ tiền.** Người dùng tự tra cứu và
+  cung cấp trực tiếp cấu trúc lệnh từ spec SAS 6.02 (Section 7.5, Table
+  7.5) — LP 0x06/0x07 (đang dùng) chỉ bật/tắt đơn giản, không có khái niệm
+  "giữ enable liên tục"; LP 0x08 có thêm field Action Flag 2-byte, bit0=1
+  mới là cơ chế cần. Đã thêm `sas_build_lp_configure_bill()` +
+  `configure_bill_persistent_enable()` (gọi ngay sau LP 0x06 thành công ở
+  cả CMD_ENABLE/CMD_ENABLE_BV), `denom_mask=0xFFFFFFFF` (chấp nhận mọi mệnh
+  giá, không giới hạn thêm). Build + flash thành công lên board thật, đọc
+  log thấy LP 0x08 gửi và (giả định) ACK — **CHƯA test bằng tiền thật**
+  (bỏ liên tiếp nhiều tờ xem còn phải bấm Enable BV lại giữa mỗi tờ hay
+  không) tại thời điểm ghi nhật ký này. Chi tiết đầy đủ trong `CLAUDE.md`
+  mục "AFT / Denomination / Ticket Control".
+
+- **Log tab (control-panel): đổi từ 2 danh sách dùng chung tất cả máy sang
+  cap riêng 12 dòng mỗi máy.** Trước đây `logs:all`/`logs:abnormal` là
+  Redis List DÙNG CHUNG cho mọi machine_id (cap 1000/300) — 1 máy log
+  nhiều có thể đẩy log máy khác ra khỏi cửa sổ trước khi kịp hiển thị. Đổi
+  sang key riêng `logs:all:{machine_id}`/`logs:abnormal:{machine_id}`, cap
+  đúng 12 mỗi key (hằng số `MAX_LOGS_PER_MACHINE`, phải giữ khớp ở 3 chỗ:
+  `mqtt-gateway.service.ts` export gốc, `machine.controller.ts` import lại,
+  và định nghĩa lại y hệt ở `App.tsx` do 2 project frontend/backend không
+  chia sẻ code). `GET /api/machines/logs` giờ gom log từng máy rồi merge,
+  không nhận `limit` query nữa.
+
+---

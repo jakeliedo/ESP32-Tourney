@@ -63,10 +63,10 @@ React Frontends
 | Backend player management | ✅ Hoàn chỉnh | `PlayerEntity`, `PlayerModule`, CRUD `/api/players` |
 | Backend round results | ✅ Hoàn chỉnh | `RoundResultEntity` — chỉ lưu khi timer hết tự nhiên |
 | Backend machine controller | ✅ Hoàn chỉnh | `GET /api/machines` + PATCH, commands |
-| Backend jackpot | ✅ Hoạt động | |
+| Backend jackpot | ✅ Hoạt động | **(2026-09-16)** Model `initial`/`min`/`max` + ramp trước khi rớt + reset ngay khi STOP — xem mục "Jackpot: initial/min/max, ramp, reset-on-cancel" |
 | Scoring logic | ✅ Credits-based | Score = credits hiện tại (không phải coin_in delta) |
-| Frontend control-panel | ✅ Hoàn chỉnh | Tabbed panel: Machines / History / Players |
-| Frontend leaderboard (:5174) | ✅ Hoàn chỉnh | Xóa máy offline khỏi bảng. **(2026-09-08)** Toàn bộ overlay (số, hàng, timer, jackpot panel) render trong 1 canvas cố định 1920×1080, scale bằng CSS `transform:scale()` theo tỷ lệ màn hình thật (`Math.max(vw/1920,vh/1080)`) — xem `Leaderboard.tsx` (`CANVAS_W/H`, `useCanvasScale()`, hàm `pxw()`). Tọa độ ROW/COL_NAME/COL_WIN/TIMER override được qua `electron/config.json` (`layout` key) khi đổi ảnh nền khác, không cần sửa code/build lại — nhưng vẫn cần đo lại tọa độ 1 lần cho mỗi ảnh mới. |
+| Frontend control-panel | ✅ Hoàn chỉnh | Tabbed panel: Machines / History / Players / Logs. **(2026-09-16)** Thêm odometer JP ở góc phải header (`JackpotOdometer.tsx`) |
+| Frontend leaderboard (:5174) | ✅ Hoàn chỉnh | Xóa máy offline khỏi bảng. **(2026-09-08)** Toàn bộ overlay (số, hàng, timer, jackpot panel) render trong 1 canvas cố định 1920×1080, scale bằng CSS `transform:scale()` theo tỷ lệ màn hình thật (`Math.max(vw/1920,vh/1080)`) — xem `Leaderboard.tsx` (`CANVAS_W/H`, `useCanvasScale()`, hàm `pxw()`). Tọa độ ROW/COL_NAME/COL_WIN/TIMER override được qua `electron/config.json` (`layout` key) khi đổi ảnh nền khác, không cần sửa code/build lại — nhưng vẫn cần đo lại tọa độ 1 lần cho mỗi ảnh mới. **(2026-09-16)** Số jackpot giờ cuộn kiểu odometer/reel (`OdometerAmount.tsx`) thay vì nhảy số tại chỗ. |
 | TypeORM migrations | ⚠️ Chưa có | Dev dùng `synchronize: true` |
 | SAS end-to-end với máy slot thật | ✅ Đã test thành công (2026-09-05) | General Poll + Credits (LP 0x1A) đọc đúng, CRC valid. Xem mục **"Nhật ký debug SAS với máy thật (2026-09)"** phía dưới để biết toàn bộ lỗi đã gặp và cách sửa. Meters (LP 0xAF) vẫn chưa có phản hồi từ máy — xem "Việc còn tồn đọng" cuối mục đó. |
 
@@ -501,6 +501,8 @@ Narrative debug đầy đủ (log thật, số liệu, thứ tự đã thử) n�
 
 **Máy DISABLED (CMD_DISABLE) không được nhận AFT_WITHDRAW** — chặn ở firmware (`s_state == SLOT_STATE_DISABLED`, có thẩm quyền thật) và backend (check DB status trước khi gửi MQTT, phản hồi nhanh hơn).
 
+**Bill Validator (BV) giữ enable liên tục xuyên suốt tournament — dùng LP 0x08 "Configure Bill Denominations" (Section 7.5, Table 7.5), thêm 2026-09-16.** Khác với LP 0x06/0x07 (Enable/Disable Bill Acceptor) chỉ bật/tắt đơn giản, LP 0x08 có thêm field 2-byte "Action Flag" — bit0=0 (mặc định SAS, hành vi cũ của project) là "tự tắt BV sau mỗi tờ tiền, host phải gửi lại LP 0x06 mỗi lần"; bit0=1 (`SAS_BILL_ACTION_KEEP_ENABLED`) là "giữ enable liên tục, không cần hỏi lại". Firmware gọi `configure_bill_persistent_enable()` (gửi LP 0x08 với `denom_mask=0xFFFFFFFF` — chấp nhận mọi mệnh giá, không giới hạn gì so với trước — và action flag bit0=1) ngay sau mỗi lần LP 0x06 thành công, ở cả `CMD_ENABLE` và `CMD_ENABLE_BV`. Response giả định là Type S ACK đơn giản (echo 1 byte địa chỉ), giống LP 0x06/0x07 — **chưa xác nhận trên máy thật**, cần test bằng cách bỏ liên tiếp 2-3 tờ tiền xem có còn phải bấm Enable BV lại giữa mỗi tờ hay không. Spec ghi ngay dưới Table 7.5: "gaming machine may be configured to ignore bills regardless of this message" — operator-menu trên máy vẫn có thể override, không đảm bảo 100%.
+
 **Quy ước tiền/cent trong toàn bộ stack: luôn `Math.round()`, không bao giờ `Math.floor()`/`parseInt()`/truncate** khi chuyển đổi dollar↔cents hoặc khi có phép nhân/chia float — `parseInt("50.75")` cắt cụt thành `50` (mất cent), và `Math.floor()` trên một pool tích lũy theo % (virtual jackpot) luôn trả THIẾU tiền một cách hệ thống. Xem `App.tsx` (buy-in/aft-in), `device.controller.ts`, `virtual-jackpot.service.ts` cho pattern đúng.
 
 ---
@@ -549,6 +551,52 @@ Nếu thấy banner ROM này mà `pio run --target upload` vẫn báo "No serial
 
 ---
 
+## Jackpot: initial/min/max, ramp, reset-on-cancel (2026-09-16)
+
+### Model config mới: `initial` / `min` / `max`
+
+Trước đây `jackpot.service.ts`/`virtual-jackpot.service.ts` chỉ có 2 giá trị `floor`/`ceiling` — `floor` vừa dùng làm **điểm reset** của pool (đầu round, sau mỗi lần rớt) vừa dùng làm **sàn trả thưởng** (clamp số tiền trả ra không thấp hơn). Giờ tách thành 3 giá trị riêng biệt:
+- **`initial`** — giá trị pool ngay sau khi reset. Bị ép **≤ `min`** (`configure()` tự `Math.min(initial, min)`) vì pool được thiết kế để "leo" từ coin-in/tick thật lên `min`, không phải bắt đầu sẵn ở đó.
+- **`min`** — sàn trả thưởng, hit không bao giờ trả thấp hơn (`.env`: `JACKPOT_BASE_AMOUNT`, giữ tên cũ để tương thích ngược).
+- **`max`** — trần trả thưởng (`.env`: `JACKPOT_MAX_AMOUNT`).
+
+Cơ chế kích hoạt **vẫn theo thời gian** (random thời điểm trong round, không đổi so với thiết kế 2026-09-09) — số tiền trả ra khi rớt = `clamp(pool_hiện_tại, min, max)`. Field/API/UI đổi tên đồng bộ: DTO backend (`RealJackpotConfigDto`/`VirtualJackpotConfigDto`), state React (`jpInitial`/`jpMin`/`jpMax`), 3 ô nhập control-panel ("Initial $"/"Min $"/"Max $" thay cho "Floor $"/"Ceiling $").
+
+### Vấn đề phát hiện: số hiển thị chưa chạy tới `min` nhưng vẫn báo rớt đúng `min`
+
+Vì trigger là theo THỜI GIAN (độc lập với giá trị pool thật), nếu mốc ngẫu nhiên rơi sớm trong round (coin-in/tick chưa tích lũy được bao nhiêu), pool hiển thị có thể mới ở $150 trong khi `min`=$500 — hệ thống vẫn báo rớt **$500** vì bị `Math.max(pool, min)` ép lên sàn, dù con số trên màn hình chưa từng chạy tới đó. Quyết định giữ trigger theo thời gian (không đổi sang trigger theo giá trị pool kiểu mystery-jackpot chuẩn ngành) — thay vào đó thêm:
+
+**Ramp trước khi rớt** — trong `RAMP_WINDOW_SEC` (6 giây) cuối trước mốc thời gian đã lên lịch, nếu pool hiện tại chưa chạm `min`, mỗi tick (`TICK_INTERVAL_SEC`=2s) chủ động cộng thêm phần chênh lệch còn thiếu chia đều cho số tick còn lại (`deficit / ticksRemaining`), để pool vừa khớp chạm `min` đúng lúc rớt thay vì đứng yên rồi báo số cao hơn hẳn. Không cần sửa gì ở frontend — hiệu ứng cuộn mượt (xem mục Odometer bên dưới) tự động hiển thị pha "leo nhanh lên" này, không lộ là giả.
+
+### Bug đã sửa: STOP (Cancel) vô tình làm rớt jackpot
+
+`forceFireRemaining()` (safety net: đảm bảo đủ `numHits`/round nếu round kết thúc mà lịch rớt chưa chạy hết — ví dụ active window đóng sớm hơn elapsed-time của target cuối) không phân biệt round kết thúc **tự nhiên** (hết giờ → FINISHED) hay **bị Cancel** (STOP thủ công → CANCELLED) — cả 2 đều khiến `active` (tournament đang ACTIVE) thành `null`, nên nhấn STOP cũng vô tình kích hoạt rớt jackpot, **vi phạm nguyên tắc "STOP = không tính kết quả"** đã có sẵn cho tournament (không lưu `RoundResultEntity`).
+
+**Fix:** `TournamentService.cancel()` giờ gọi `jackpotService.resetForCancelledRound(id)` + `virtualJackpotService.resetForCancelledRound(id)` **ngay lập tức, đồng bộ**, ngay sau khi atomic-flip status→CANCELLED thành công:
+- Chỉ tác động nếu round bị cancel đúng là round đang "armed" của jackpot đó (`armed_tournament_id === id`) — không đụng round khác.
+- Reset pool về `initial`, xoá `armed_tournament_id`/`targets`/`hit_idx`, broadcast `jackpot_pool_update` ngay (không đợi tick 2s tiếp theo) — cả leaderboard và control-panel nhảy về `initial` ngay khi bấm STOP.
+- Việc xoá `armed_tournament_id` NGAY LẬP TỨC cũng tự động ngăn `forceFireRemaining()` rớt nhầm ở tick kế tiếp, vì tick đó sẽ thấy `armedId` rỗng và no-op — `forceFireRemaining()` giờ **chỉ áp dụng cho round kết thúc tự nhiên**, đúng comment đã cập nhật trong code.
+- `TournamentModule` giờ import `JackpotModule` (đã thêm `exports: [JackpotService, VirtualJackpotService]` vào `JackpotModule`) để inject được 2 service này vào `TournamentService`.
+
+### Odometer digit-reel (leaderboard + control-panel)
+
+Yêu cầu: số jackpot hiển thị phải "cuộn" mượt như đồng hồ công-tơ-mét/bánh xe số slot machine thật, không nhảy số tại chỗ. Bài học quá trình làm (đáng nhớ cho UI tương tự sau này):
+1. **Lần 1 (sai):** dùng CSS `transition` kích hoạt mỗi khi giá trị đổi + nội suy giá trị bằng `requestAnimationFrame` phía trên (`useSmoothedPoolValue`) → giá trị đổi ~60 lần/giây → mỗi lần đổi HỦY transition đang chạy dở và bắt đầu lại → **giật/twitch**, không mượt.
+2. **Fix đúng:** bỏ hẳn cơ chế "trigger transition khi số đổi". Vị trí cuộn của từng ô số giờ là **hàm liên tục** của giá trị hiện tại: `pos = (cents / 10^exponent) % 10` (exponent = vị trí chữ số tính từ phải, đơn vị cents — không có bước nhảy đặc biệt ở dấu chấm thập phân vì mọi thứ quy về cents). Không còn gì để "restart" — mỗi khung hình chỉ vẽ đúng vị trí phép tính cho ra. Dải số hiển thị là strip 11 ô `[0,1,...,9,0]` (1 vòng + 1 ô đệm) để cuộn xuyên qua điểm gập 9→0 luôn mượt.
+3. `useSmoothedPoolValue` (hook riêng, trùng lặp có chủ đích giữa 2 app frontend độc lập) nội suy giá trị pool giữa 2 lần cập nhật server (tick 2s) bằng kỹ thuật "trễ lại đúng 1 chu kỳ" (interpolation-with-buffer, giống pattern dùng trong game networking): thay vì snap ngay khi có giá trị mới, replay lại DELTA của chu kỳ TRƯỚC đó trải đều trong chu kỳ hiện tại — luôn có "đích" để cuộn tới, không có khoảng đứng yên rồi giật.
+4. File: `OdometerAmount.tsx` (leaderboard), `JackpotOdometer.tsx` (control-panel, bản compact hơn — text nhỏ, đặt ở góc phải header cùng hàng "SLOT TOURNAMENT"), cả 2 dùng chung logic nhưng giữ trùng lặp (2 app frontend độc lập, không có package chung). `useSmoothedPoolValue.ts` cũng trùng lặp tương tự.
+5. Control-panel giờ nhận thêm socket event `jackpot_pool_update` (trước đây chỉ leaderboard nghe event này).
+
+---
+
+## Log per-machine cap (2026-09-16)
+
+Trước đây log cho tab Logs (control-panel) lưu ở 2 Redis List **dùng chung cho TẤT CẢ máy**: `logs:all` (cap 1000), `logs:abnormal` (cap 300) — 1 máy log nhiều (nhiễu) có thể đẩy log của máy khác ra khỏi danh sách chung trước khi kịp hiển thị.
+
+**Fix:** đổi sang key riêng theo từng máy — `logs:all:{machine_id}` / `logs:abnormal:{machine_id}`, mỗi cái cap đúng **12** (`MAX_LOGS_PER_MACHINE`, export từ `mqtt-gateway.service.ts`, import lại ở `machine.controller.ts` và định nghĩa lại y hệt ở frontend `App.tsx` — 3 nơi phải khớp nhau nếu đổi số này sau này). `GET /api/machines/logs` giờ lấy log của TỪNG máy (tối đa 12/máy) rồi merge + sort theo `ts`, thay vì cắt một danh sách chung — không còn nhận `limit` query param nữa (mỗi máy đã tự cap sẵn). `LogColumn` (frontend) đổi `.slice(-100)` → `.slice(-MAX_LOGS_PER_MACHINE)`.
+
+---
+
 ## Cấu hình Firmware (config.h)
 
 **Tất cả pin DM9051 là internal traces — KHÔNG chỉnh.**
@@ -578,8 +626,11 @@ Các define còn thực sự nằm trong `config.h` và có thể cần chỉnh:
 | `PORT` | 3000 | NestJS HTTP port |
 | `NODE_ENV` | development | `production` tắt TypeORM sync |
 | `JACKPOT_CONTRIBUTION_RATE` | 0.5 | % coin-in vào jackpot pool |
-| `JACKPOT_BASE_AMOUNT` | 10000 | Credits pool reset sau jackpot |
-| `JACKPOT_MAX_AMOUNT` | 1000000 | Giới hạn trên hit_value |
+| `JACKPOT_BASE_AMOUNT` | 10000 | `min` — sàn trả thưởng, hit không bao giờ trả thấp hơn giá trị này |
+| `JACKPOT_INITIAL_AMOUNT` | = `JACKPOT_BASE_AMOUNT` nếu bỏ trống | `initial` — giá trị pool ngay sau khi reset (đầu round / sau 1 lần rớt); có thể thấp hơn `min` để pool "leo" từ coin-in thật lên tới min/max thay vì bắt đầu sẵn ở sàn |
+| `JACKPOT_MAX_AMOUNT` | 1000000 | `max` — trần trả thưởng |
+
+**2026-09-16 — tách `floor` cũ thành `initial`/`min`/`max` riêng biệt** (trước đó 1 giá trị `floor` vừa là điểm reset vừa là sàn trả thưởng). Chi tiết đầy đủ (ramp trước khi rớt, reset khi STOP) xem mục **"Jackpot: initial/min/max, ramp, reset-on-cancel (2026-09-16)"** bên dưới.
 
 ---
 
@@ -601,8 +652,15 @@ Các define còn thực sự nằm trong `config.h` và có thể cần chỉnh:
 |---|---|---|
 | `machine:{id}:state` | Hash | credits, coin_in, coin_out, state, updated_at |
 | `tourney:{id}:scores` | Sorted Set | member=machineId, score=credits; ZREM khi máy offline |
-| `jackpot:pool` | String | Pool hiện tại (float) |
-| `jackpot:hit_value` | String | Hit value bí mật (int) |
+| `jackpot:pool` / `vjp:pool` | String | Pool hiện tại (float) — real / virtual |
+| `jackpot:initial` `jackpot:min` `jackpot:max` `jackpot:contrib_rate` `jackpot:num_hits` | String | Config real JP (2026-09-16, thay cho `jackpot:floor`/`jackpot:ceiling` cũ) |
+| `vjp:initial` `vjp:min` `vjp:max` `vjp:tick_increment` `vjp:num_hits` `vjp:enabled` | String | Config virtual JP (2026-09-16, thay cho `vjp:floor`/`vjp:ceiling` cũ) |
+| `jackpot:armed_tournament_id` / `vjp:armed_tournament_id` | String | Id round đang có lịch rớt JP đã lên (dùng để phát hiện round mới + safety net cuối round) |
+| `jackpot:targets` / `vjp:targets` | String (JSON) | Mảng thời điểm (giây, elapsed) đã random để rớt trong round hiện tại |
+| `jackpot:hit_idx` / `vjp:hit_idx` | String | Đã rớt tới lần thứ mấy trong lịch trên |
+| `jackpot:hit_value` | String | Hit value bí mật (int) — cơ chế cũ, xem lại nếu còn dùng |
+| `jackpot:mode` | String | `'real'` hoặc `'virtual'` |
+| `logs:all:{machine_id}` / `logs:abnormal:{machine_id}` | List | Log riêng từng máy cho tab Logs, cap 12 mỗi danh sách (2026-09-16, thay cho `logs:all`/`logs:abnormal` dùng chung trước đây) |
 
 ---
 
@@ -622,7 +680,14 @@ Các define còn thực sự nằm trong `config.h` và có thể cần chỉnh:
 | POST | `/api/tournaments/:id/cancel` | Huỷ thủ công (không lưu kết quả) |
 | POST | `/api/tournaments/:id/next-round` | Round tiếp theo cùng session |
 | GET/POST/PATCH/DELETE | `/api/players` | CRUD players |
-| GET | `/api/jackpot/pool` | Jackpot pool hiện tại |
+| GET | `/api/machines/logs?severity=all\|abnormal` | Log gộp từng máy (mỗi máy tối đa 12, xem Redis Keys) |
+| GET/POST | `/api/jackpot/mode` | Đọc/đổi chế độ `real`/`virtual` |
+| GET/POST | `/api/jackpot/config` | Config real JP — body/response `{initial,min,max,rate,numHits}` (2026-09-16, đổi tên field từ `floor`/`ceiling`) |
+| GET/POST | `/api/jackpot/virtual/config` | Config virtual JP — `{initial,min,max,tickIncrement,numHits,enabled}` |
+| GET | `/api/jackpot/pool` | Real JP pool hiện tại |
+| GET | `/api/jackpot/virtual/pool` | Virtual JP pool hiện tại |
+| GET | `/api/jackpot/hits` | Lịch sử 100 lần rớt JP gần nhất |
+| GET/POST | `/api/jackpot/virtual/video-url` `/api/jackpot/virtual/video` `/api/jackpot/virtual/video/clear` | Video ăn mừng khi rớt JP (virtual) |
 
 ---
 
@@ -631,5 +696,7 @@ Các define còn thực sự nằm trong `config.h` và có thể cần chỉnh:
 | Event | Payload |
 |---|---|
 | `leaderboard_update` | `{ tournamentId, rankings[], roundNumber, totalRounds, endsAt }` |
-| `jackpot_hit` | `{ machineId, amount }` |
+| `jackpot_hit` | `{ machineId, amount, videoUrl }` |
+| `jackpot_pool_update` | `{ pool }` — bắn mỗi 2s tick (real + virtual dùng chung event), nguồn cho odometer JP ở cả leaderboard và control-panel |
 | `machine_update` | `{ machineId, credits, coin_in, coin_out, status }` |
+| `machine_log` | `LogEntry { machineId, ts, severity, code, message }` — tab Logs control-panel |

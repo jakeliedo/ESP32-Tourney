@@ -13,5 +13,6 @@ import { DeviceGatewayModule } from '../device-gateway/device-gateway.module';
   imports: [DatabaseModule, RedisModule, DeviceGatewayModule],
   providers: [JackpotService, VirtualJackpotService],
   controllers: [JackpotController],
+  exports: [JackpotService, VirtualJackpotService],
 })
 export class JackpotModule {}

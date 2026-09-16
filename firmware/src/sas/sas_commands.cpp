@@ -555,6 +555,31 @@ SasValidationStatusResponse sas_parse_validation_status(const uint8_t* buf, size
 }
 
 // ─────────────────────────────────────────────────────────────
+// Long Poll 08 – Configure Bill Denominations
+//
+// Field layout per SAS 6.02 Section 7.5, Table 7.5. denom_mask/action_flags
+// are "binary" fields, so LSB-first transmission per Section 2.2.3, same
+// convention as every other multi-byte binary field in this codebase.
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_configure_bill(uint8_t* buf, uint8_t address,
+                                    uint32_t denom_mask, uint16_t action_flags) {
+    buf[0] = address;
+    buf[1] = SAS_CMD_CONFIGURE_BILL;
+    buf[2] = 0x06;  // length: 6 data bytes follow (4 denom + 2 action), not including CRC
+
+    buf[3] = (uint8_t)(denom_mask);         // LSB
+    buf[4] = (uint8_t)(denom_mask >> 8);
+    buf[5] = (uint8_t)(denom_mask >> 16);
+    buf[6] = (uint8_t)(denom_mask >> 24);   // MSB
+    buf[7] = (uint8_t)(action_flags);       // LSB
+    buf[8] = (uint8_t)(action_flags >> 8);  // MSB
+
+    crc16_append(buf, 9);
+    return 11;
+}
+
+// ─────────────────────────────────────────────────────────────
 // Long Poll 54 – Send SAS Version ID and Gaming Machine Serial Number
 //
 // Response: [addr][0x54][length][SAS version:3 ASCII]["serial number

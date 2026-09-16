@@ -13,6 +13,12 @@
 #define SAS_CMD_STARTUP             0x02  // Long Poll 02: Startup (Enable Play) – Type S
 #define SAS_CMD_ENABLE_BILL         0x06  // Long Poll 06: Enable Bill Acceptor – Type S
 #define SAS_CMD_DISABLE_BILL        0x07  // Long Poll 07: Disable Bill Acceptor – Type S
+#define SAS_CMD_CONFIGURE_BILL      0x08  // Long Poll 08: Configure Bill Denominations – Type S (Section 7.5, Table 7.5)
+
+// Long Poll 08 Action Flags (Table 7.5, 2-byte "binary" field, LSB-first
+// per Section 2.2.3). Only bit 0 is defined in SAS 6.02; bits 1-7 are TBD.
+#define SAS_BILL_ACTION_AUTO_DISABLE  0x0000  // bit0=0 (default): machine disables bill acceptor after each accepted bill -- host must resend LP 0x06 for every bill
+#define SAS_BILL_ACTION_KEEP_ENABLED  0x0001  // bit0=1: bill acceptor stays enabled after each accepted bill, no resend needed
 #define SAS_CMD_SEND_CREDITS        0x1A  // Long Poll 1A: Current Credit Meter
 #define SAS_CMD_SEND_HANDPAY        0x1B  // Long Poll 1B: Handpay Information
 // Long Poll 11: Send Total Coin In Meter (Section 7.1, single 4-byte BCD
@@ -460,6 +466,32 @@ size_t sas_build_lp_aft_lock_status(uint8_t* buf, uint8_t address, uint8_t lock_
 size_t sas_build_lp_validation_status(uint8_t* buf, uint8_t address,
                                        uint16_t control_mask, uint16_t status_bits,
                                        uint16_t cashable_exp_days, uint16_t restricted_exp_days);
+
+/**
+ * Build Long Poll 08 – Configure Bill Denominations.
+ * Request: [addr][0x08][len=0x06][denom_mask:4 binary LSB-first][action_flags:2 binary LSB-first][CRC_L][CRC_H]
+ * denom_mask enables/disables individual bill denominations independently
+ * (bit layout is currency-table-specific per Table 7.5 -- pass 0xFFFFFFFF
+ * to accept every denomination the machine's own bill validator hardware
+ * supports, i.e. don't restrict anything, matching the unrestricted
+ * acceptance LP 0x06 alone already had).
+ * action_flags bit0 controls whether the bill acceptor auto-disables after
+ * each accepted bill (SAS_BILL_ACTION_AUTO_DISABLE, the default/legacy
+ * behavior matching plain LP 0x06) or stays enabled continuously
+ * (SAS_BILL_ACTION_KEEP_ENABLED) -- bits 1-7 are TBD in SAS 6.02, pass 0.
+ * Response is a bare Type S ACK (1-byte address echo), same shape as
+ * LP 0x06/0x07 -- NOT a Table-15.2b-style parsed status response.
+ * Per spec, right below Table 7.5: "The gaming machine may be configured to
+ * ignore bills regardless of this message" -- the operator menu can still
+ * override this even when the call succeeds.
+ * @param buf           Output buffer (min 11 bytes)
+ * @param address       SAS machine address
+ * @param denom_mask    Bill Denominations bitmask (Table 7.5); 0xFFFFFFFF = accept all
+ * @param action_flags  SAS_BILL_ACTION_* (bitwise OR if more bits get defined later)
+ * @return frame length (always 11)
+ */
+size_t sas_build_lp_configure_bill(uint8_t* buf, uint8_t address,
+                                    uint32_t denom_mask, uint16_t action_flags);
 
 /**
  * Build Long Poll 54 – Send SAS Version ID and Gaming Machine Serial Number.

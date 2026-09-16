@@ -1,5 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useSmoothedPoolValue } from '../hooks/useSmoothedPoolValue';
+import { OdometerAmount } from './OdometerAmount';
 
 interface RankEntry    { machineId: string; score: number; rank: number; }
 interface JackpotAlert { machineId: string; amount: number; }
@@ -189,8 +191,13 @@ export default function Leaderboard() {
   const [timeLeft, setTimeLeft]   = useState<number | null>(null);
   // Duration shown before tournament starts (from SCHEDULED tournament)
   const [standbyTime, setStandbyTime] = useState<number | null>(null);
-  // Virtual jackpot pool — updated by jackpot_pool_update socket event
+  // Jackpot pool — raw target value from jackpot_pool_update (real or
+  // virtual, same event either way). vjpSmoothed continuously interpolates
+  // between server ticks (see useSmoothedPoolValue) so <OdometerAmount>'s
+  // per-digit reels get fed a steady stream of small updates instead of one
+  // big jump every ~2s.
   const [vjpPool, setVjpPool]         = useState<number | null>(null);
+  const vjpSmoothed = useSmoothedPoolValue(vjpPool);
   const [jackpotVideoUrl, setJackpotVideoUrl] = useState<string | null>(null);
 
   const scale = useCanvasScale();
@@ -500,7 +507,7 @@ export default function Leaderboard() {
       {/* ── VIRTUAL JACKPOT PANEL — top-LEFT, mirrors timer circle ────────
            Positioned symmetrically: left:2.8%, same top/size as timer.
            Uses text-shadow glow (no WebkitTextFillColor) for reliable rendering. */}
-      {tournamentRunning && vjpPool !== null && (
+      {tournamentRunning && vjpSmoothed !== null && (
         <div style={{
           position: 'absolute',
           left:   `${TIMER.right}%`,  // mirrors timer's `right` — symmetric axis
@@ -544,7 +551,7 @@ export default function Leaderboard() {
             animation: 'vjpAmountShimmer 2.2s ease-in-out infinite',
             whiteSpace: 'nowrap',
           }}>
-            {`$${(vjpPool / 100).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+            <OdometerAmount cents={vjpSmoothed} fontSizePx={pxw(1.55)} />
           </span>
         </div>
       )}

@@ -69,8 +69,10 @@ export interface LogEntry {
 export const getMachines = (): Promise<Machine[]> =>
   api.get<Machine[]>('/machines').then(r => r.data);
 
-export const getLogs = (severity: 'all' | 'abnormal' = 'all', limit = 500): Promise<LogEntry[]> =>
-  api.get<LogEntry[]>('/machines/logs', { params: { severity, limit } }).then(r => r.data);
+// Backend caps each machine's own backlog at MAX_LOGS_PER_MACHINE (12) --
+// no `limit` param needed, every machine's full (small) history comes back.
+export const getLogs = (severity: 'all' | 'abnormal' = 'all'): Promise<LogEntry[]> =>
+  api.get<LogEntry[]>('/machines/logs', { params: { severity } }).then(r => r.data);
 
 export const sendMachineCommand = (
   id: string,
@@ -127,8 +129,9 @@ export const setJackpotMode = (mode: JackpotMode): Promise<void> =>
 
 // Real Jackpot config
 export interface RealJackpotConfig {
-  floor: number;    // credits (e.g. 10000 = $100.00)
-  ceiling: number;  // credits (e.g. 1000000 = $10000.00)
+  initial: number;  // credits -- pool value right after a reset
+  min: number;      // credits -- minimum payout a hit can be clamped up to
+  max: number;      // credits -- maximum payout a hit can be clamped down to
   rate: number;     // percentage (e.g. 0.5 = 0.5%)
   numHits: number;  // guaranteed jackpot hits per round
 }
@@ -141,8 +144,9 @@ export const setRealJackpotConfig = (config: RealJackpotConfig): Promise<void> =
 
 // Virtual Jackpot config
 export interface VirtualJackpotConfig {
-  floor: number;          // credits (e.g. 10000 = $100.00)
-  ceiling: number;        // credits (e.g. 30000 = $300.00)
+  initial: number;        // credits -- pool value right after a reset
+  min: number;            // credits -- minimum payout a hit can be clamped up to
+  max: number;            // credits -- maximum payout a hit can be clamped down to
   tickIncrement: number;  // max credits added per 2s tick (actual increment is random 1..this)
   numHits: number;        // guaranteed jackpot hits per round
   enabled: boolean;

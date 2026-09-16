@@ -15,6 +15,10 @@ import { TransactionEntity, TransactionStatus } from '../database/entities/trans
 import { TournamentEntity, TournamentStatus } from '../database/entities/tournament.entity';
 import { LeaderboardGateway, LogEntry } from './leaderboard.gateway';
 
+// Per-machine log history cap (Logs tab) -- each machine keeps its own last
+// N entries, independently for the "all" and "abnormal" backlogs.
+export const MAX_LOGS_PER_MACHINE = 12;
+
 interface TelemetryPayload {
   machine_id: string;
   exception: number;
@@ -251,9 +255,17 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
       this.lastPrinter.set(machineId, data.printer_enabled);
     }
 
+    // Capped PER MACHINE (not one shared list across all machines) so a
+    // chatty machine can never push a quiet machine's older entries out of
+    // range before the control panel ever sees them -- each machine keeps
+    // exactly its own last MAX_LOGS_PER_MACHINE entries, same per-id keying
+    // convention as `machine:{id}:state` (found 2026-09-16, previously
+    // `logs:all`/`logs:abnormal` were single lists shared by every machine).
     for (const entry of entries) {
-      await this.redis.pushLog('logs:all', entry, 1000);
-      if (entry.severity === 'abnormal') await this.redis.pushLog('logs:abnormal', entry, 300);
+      await this.redis.pushLog(`logs:all:${entry.machineId}`, entry, MAX_LOGS_PER_MACHINE);
+      if (entry.severity === 'abnormal') {
+        await this.redis.pushLog(`logs:abnormal:${entry.machineId}`, entry, MAX_LOGS_PER_MACHINE);
+      }
       this.leaderboard.broadcastMachineLog(entry);
     }
 
@@ -300,8 +312,15 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
   }
 
   private stateToStatus(state: number): MachineStatus {
+    // state 0 = SLOT_STATE_INIT ("still probing SAS address after boot/
+    // reconnect", sas_polling.h). Receiving a telemetry message at all
+    // already proves MQTT connectivity, so mapping INIT to OFFLINE here
+    // let the very first telemetry burst (sent before SAS finishes
+    // syncing) clobber a status='online' write that had just landed a
+    // moment earlier -- board stuck looking offline in the DB/control-panel
+    // even while it kept working and reading real SAS data (found 2026-09-16).
     const map: Record<number, MachineStatus> = {
-      0: MachineStatus.OFFLINE,
+      0: MachineStatus.ONLINE,
       1: MachineStatus.ONLINE,
       2: MachineStatus.PLAYING,
       3: MachineStatus.LOCKED,

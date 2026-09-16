@@ -43,13 +43,17 @@ import { TransactionEntity, TransactionType, TransactionStatus } from '../databa
 import { TournamentEntity, TournamentStatus } from '../database/entities/tournament.entity';
 import { JackpotHitEntity } from '../database/entities/jackpot_hit.entity';
 
+const TICK_INTERVAL_SEC = 2;   // matches the setInterval() below
+const RAMP_WINDOW_SEC   = 6;   // start nudging pool toward `min` this many seconds before a scheduled hit
+
 @Injectable()
 export class JackpotService implements OnModuleInit, OnModuleDestroy {
   private ticker: ReturnType<typeof setInterval> | null = null;
 
   private contributionRate: number;
-  private floor: number;
-  private ceiling: number;
+  private initial: number;  // pool value right after a reset (round start / post-hit)
+  private min: number;      // minimum payout a hit can ever be clamped up to
+  private max: number;      // maximum payout a hit can ever be clamped down to
   private numHits = 1;   // guaranteed jackpot hits per round
   private lastCoinIn = new Map<string, number>();  // machineId -> last-seen cumulative coin_in
 
@@ -69,24 +73,29 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     // Load defaults from .env
     this.contributionRate = +this.cfg.get('JACKPOT_CONTRIBUTION_RATE', 0.5) / 100;
-    this.floor   = +this.cfg.get('JACKPOT_BASE_AMOUNT', 10000);
-    this.ceiling = +this.cfg.get('JACKPOT_MAX_AMOUNT', 1000000);
+    this.min     = +this.cfg.get('JACKPOT_BASE_AMOUNT', 10000);
+    this.max     = +this.cfg.get('JACKPOT_MAX_AMOUNT', 1000000);
+    // No dedicated env var for this yet -- defaults to `min` (old behavior:
+    // floor doubled as both reset value and payout floor) unless overridden.
+    this.initial = +this.cfg.get('JACKPOT_INITIAL_AMOUNT', this.min);
 
     // Override with saved config from Redis (persists across restarts)
-    const f  = await this.redis.get('jackpot:floor');
-    const c  = await this.redis.get('jackpot:ceiling');
+    const i  = await this.redis.get('jackpot:initial');
+    const mn = await this.redis.get('jackpot:min');
+    const mx = await this.redis.get('jackpot:max');
     const r  = await this.redis.get('jackpot:contrib_rate');
     const nh = await this.redis.get('jackpot:num_hits');
-    if (f)  this.floor            = parseInt(f);
-    if (c)  this.ceiling          = parseInt(c);
+    if (i)  this.initial          = parseInt(i);
+    if (mn) this.min              = parseInt(mn);
+    if (mx) this.max              = parseInt(mx);
     if (r)  this.contributionRate = parseFloat(r);
     if (nh) this.numHits          = parseInt(nh);
 
     // Ensure pool is initialised
     const pool = await this.redis.getJackpotPool();
-    if (pool === 0) await this.redis.resetJackpotPool(this.floor);
+    if (pool === 0) await this.redis.resetJackpotPool(this.initial);
 
-    this.ticker = setInterval(() => this.checkSchedule().catch(() => {}), 2000);
+    this.ticker = setInterval(() => this.checkSchedule().catch(() => {}), TICK_INTERVAL_SEC * 1000);
   }
 
   onModuleDestroy(): void {
@@ -95,14 +104,23 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
 
   // ── Called by controller when operator updates settings ───
 
-  async configure(floor: number, ceiling: number, rate: number, numHits: number): Promise<void> {
-    this.floor            = Math.max(1, Math.floor(floor));
-    this.ceiling           = Math.max(this.floor + 1, Math.floor(ceiling));
+  async configure(
+    initial: number, min: number, max: number, rate: number, numHits: number,
+  ): Promise<void> {
+    this.min               = Math.max(1, Math.floor(min));
+    this.max                = Math.max(this.min + 1, Math.floor(max));
+    // initial is where the pool starts/resets to -- allowed to sit anywhere
+    // up to `min` (it's meant to climb INTO [min, max] from real coin-in,
+    // not necessarily start already at the payout floor), but never above it
+    // or a hit could fire below its own configured floor on the very first
+    // tick of a round.
+    this.initial            = Math.max(1, Math.min(Math.floor(initial), this.min));
     this.contributionRate  = Math.max(0, rate) / 100;
     this.numHits            = Math.max(1, Math.round(numHits));
 
-    await this.redis.set('jackpot:floor',        String(this.floor));
-    await this.redis.set('jackpot:ceiling',      String(this.ceiling));
+    await this.redis.set('jackpot:initial',      String(this.initial));
+    await this.redis.set('jackpot:min',          String(this.min));
+    await this.redis.set('jackpot:max',          String(this.max));
     await this.redis.set('jackpot:contrib_rate', String(this.contributionRate));
     await this.redis.set('jackpot:num_hits',     String(this.numHits));
 
@@ -110,14 +128,15 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
     // schedule the next time it sees an active tournament (see comment in
     // VirtualJackpotService.configure() for why this can't happen here --
     // we don't yet reliably know the round's real duration_seconds).
-    await this.redis.resetJackpotPool(this.floor);
+    await this.redis.resetJackpotPool(this.initial);
     await this.redis.del('jackpot:armed_tournament_id');
   }
 
-  getConfig(): { floor: number; ceiling: number; rate: number; numHits: number } {
+  getConfig(): { initial: number; min: number; max: number; rate: number; numHits: number } {
     return {
-      floor:   this.floor,
-      ceiling: this.ceiling,
+      initial: this.initial,
+      min:     this.min,
+      max:     this.max,
       rate:    this.contributionRate * 100,
       numHits: this.numHits,
     };
@@ -133,7 +152,16 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
       where: { status: TournamentStatus.ACTIVE },
       order: { id: 'DESC' },
     });
-    if (!active) return;
+    if (!active) {
+      // No ACTIVE tournament right now -- if one just ended (or was
+      // cancelled) while this service still had unfired guaranteed hits
+      // armed for it, fire them now with whatever the pool holds instead of
+      // silently dropping the round's numHits commitment (this can happen
+      // if the round's real active window closes a tick before a scheduled
+      // target's elapsed-time would have crossed).
+      await this.forceFireRemaining();
+      return;
+    }
 
     const armedId = await this.redis.get('jackpot:armed_tournament_id');
     let targets: number[];
@@ -146,7 +174,7 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
       await this.redis.set('jackpot:armed_tournament_id', String(active.id));
       await this.redis.set('jackpot:targets', JSON.stringify(targets));
       await this.redis.set('jackpot:hit_idx', '0');
-      await this.redis.resetJackpotPool(this.floor);
+      await this.redis.resetJackpotPool(this.initial);
       // Reseed the coin-in baseline to each machine's CURRENT meter value
       // so this round's accrual starts from zero, instead of counting
       // whatever coin-in happened between rounds (or before this service
@@ -182,6 +210,30 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // Nudge the pool toward `min` in the final stretch before a scheduled
+    // hit, so a hit landing early in a round (little real coin-in accrued
+    // yet) doesn't force-clamp the payout up to `min` from a displayed pool
+    // that's visibly nowhere close (found 2026-09-16 -- the trigger is
+    // time-based, independent of the pool's real value, so this could
+    // report a "$500 jackpot" while the on-screen counter was still sitting
+    // at $150). Ramps evenly over the remaining ticks in the window so the
+    // existing frontend smoothing renders it as a normal-looking climb, not
+    // a teleport.
+    const elapsedSec = active.started_at
+      ? (Date.now() - new Date(active.started_at).getTime()) / 1000
+      : 0;
+    if (hitIdx < targets.length && active.started_at) {
+      const timeUntilHit = targets[hitIdx] - elapsedSec;
+      if (timeUntilHit > 0 && timeUntilHit <= RAMP_WINDOW_SEC) {
+        const poolNow  = await this.redis.getJackpotPool();
+        const deficit  = this.min - poolNow;
+        if (deficit > 0) {
+          const ticksRemaining = Math.max(1, Math.ceil(timeUntilHit / TICK_INTERVAL_SEC));
+          await this.redis.incrementJackpotPool(deficit / ticksRemaining);
+        }
+      }
+    }
+
     // Broadcast the live pool every tick, same as VirtualJackpotService --
     // without this, the leaderboard's jackpot panel never updates at all
     // while in 'real' mode (it's driven purely by this socket event, and
@@ -190,18 +242,74 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
     this.leaderboard.broadcastJackpotPool(Math.round(currentPool));
 
     if (hitIdx >= targets.length || !active.started_at) return;
-
-    const elapsedSec = (Date.now() - new Date(active.started_at).getTime()) / 1000;
     if (elapsedSec < targets[hitIdx]) return;
 
     const pool   = currentPool;
-    const amount = Math.round(Math.min(Math.max(pool, this.floor), this.ceiling));
+    const amount = Math.round(Math.min(Math.max(pool, this.min), this.max));
 
     const rankings = await this.redis.getLeaderboard(active.id);
     const winner   = rankings[0]?.machineId ?? 'REAL';
 
     await this.triggerJackpot(winner, amount, active.id, active.session_id ?? null);
     await this.redis.set('jackpot:hit_idx', String(hitIdx + 1));
+  }
+
+  // Safety net for checkSchedule()'s `!active` branch: a round can end
+  // NATURALLY (timer runs out -> FINISHED) with fewer than `numHits`
+  // scheduled targets actually crossed, e.g. if the real active window
+  // closes a tick before the last target's elapsed-time would have. Rather
+  // than silently losing the round's numHits guarantee, fire whatever is
+  // still pending immediately, clamped into [min, max] just like a normal
+  // scheduled hit.
+  //
+  // Does NOT apply to a manually-STOPped (CANCELLED) round -- cancel() in
+  // tournament.service.ts calls resetForCancelledRound() synchronously,
+  // which clears `armed_tournament_id` before this ever gets a chance to
+  // run, so this correctly no-ops for that case (a cancelled round pays out
+  // no results/jackpot, same as it saves no RoundResultEntity -- found
+  // 2026-09-16, this safety net was firing a jackpot on manual STOP, which
+  // contradicts that "cancel = no consequences" rule).
+  private async forceFireRemaining(): Promise<void> {
+    const armedId = await this.redis.get('jackpot:armed_tournament_id');
+    if (!armedId) return;
+
+    const targetsStr = await this.redis.get('jackpot:targets');
+    const targets: number[] = targetsStr ? JSON.parse(targetsStr) : [];
+    const idxStr = await this.redis.get('jackpot:hit_idx');
+    let hitIdx = idxStr ? parseInt(idxStr) : 0;
+    if (hitIdx >= targets.length) return;
+
+    const tournamentId = parseInt(armedId);
+    const pool   = await this.redis.getJackpotPool();
+    const amount = Math.round(Math.min(Math.max(pool, this.min), this.max));
+    const rankings = await this.redis.getLeaderboard(tournamentId);
+    const winner   = rankings[0]?.machineId ?? 'REAL';
+
+    while (hitIdx < targets.length) {
+      await this.triggerJackpot(winner, amount, tournamentId, null);
+      hitIdx += 1;
+    }
+    // Mark this round fully settled so subsequent ticks (still `!active`,
+    // e.g. between rounds) don't re-fire against the same armed id.
+    await this.redis.set('jackpot:hit_idx', String(hitIdx));
+  }
+
+  // Called synchronously by TournamentService.cancel() right after a manual
+  // STOP -- resets pool/schedule immediately instead of leaving it frozen
+  // at whatever value it happened to be at (visible on the leaderboard/
+  // control-panel odometer for up to the next 2s tick otherwise) and, more
+  // importantly, clears `armed_tournament_id` BEFORE the next tick so
+  // forceFireRemaining() can't mistake this cancelled round for a naturally-
+  // finished one and pay out a jackpot for it.
+  async resetForCancelledRound(tournamentId: number): Promise<void> {
+    const armedId = await this.redis.get('jackpot:armed_tournament_id');
+    if (armedId !== String(tournamentId)) return; // not this round's jackpot state
+
+    await this.redis.resetJackpotPool(this.initial);
+    await this.redis.del('jackpot:armed_tournament_id');
+    await this.redis.del('jackpot:targets');
+    await this.redis.del('jackpot:hit_idx');
+    this.leaderboard.broadcastJackpotPool(this.initial);
   }
 
   // ── Jackpot trigger ───────────────────────────────────────
@@ -233,7 +341,7 @@ export class JackpotService implements OnModuleInit, OnModuleDestroy {
     const videoUrl = await this.redis.get('vjp:video_url');
     this.leaderboard.broadcastJackpotHit(machineId, amount, videoUrl || null);
 
-    await this.redis.resetJackpotPool(this.floor);
+    await this.redis.resetJackpotPool(this.initial);
   }
 
   // `numHits` independent random target times (elapsed seconds from round

@@ -9,8 +9,12 @@ import api, {
   Machine, Player, SessionDto, JackpotHit, JackpotMode, LogEntry,
   getHistory, getPlayers, upsertPlayer, deletePlayer, getLogs,
 } from './services/api';
+import { JackpotOdometer } from './components/JackpotOdometer';
+import { useSmoothedPoolValue } from './hooks/useSmoothedPoolValue';
 
 const APP_VERSION = 'v1.0.0';
+// Matches MAX_LOGS_PER_MACHINE in backend/src/device-gateway/mqtt-gateway.service.ts
+const MAX_LOGS_PER_MACHINE = 12;
 
 const SESSION_COLORS = [
   '#61afef', '#98c379', '#e06c75', '#c678dd',
@@ -60,11 +64,16 @@ export default function App() {
   const [sessionName, setSessionName]        = useState('');
   // Jackpot mode + config
   const [jpMode,    setJpMode]    = useState<JackpotMode>('virtual');
-  const [jpFloor,   setJpFloor]   = useState('100');    // $ display value
-  const [jpCeiling, setJpCeiling] = useState('300');    // $ display value
+  const [jpInitial, setJpInitial] = useState('100');    // $ display value -- pool value right after a reset
+  const [jpMin,     setJpMin]     = useState('100');    // $ display value -- minimum payout a hit can be clamped up to
+  const [jpMax,     setJpMax]     = useState('300');    // $ display value -- maximum payout a hit can be clamped down to
   const [jpRate,    setJpRate]    = useState('0.5');    // % (real JP only)
   const [vjpTick,   setVjpTick]   = useState('5');      // max credits/tick (virtual JP only)
   const [jpNumHits, setJpNumHits] = useState('1');      // guaranteed jackpot hits per round (both modes)
+  // Live jackpot pool readout (header odometer) -- pushed by the same
+  // jackpot_pool_update socket event the leaderboard uses, real or virtual.
+  const [jpPool, setJpPool] = useState<number | null>(null);
+  const jpPoolSmoothed = useSmoothedPoolValue(jpPool);
   const [vjpVideoName, setVjpVideoName]      = useState<string | null>(null);
   const [vjpVideoUploading, setVjpVideoUploading] = useState(false);
   const [jackpotHits, setJackpotHits]        = useState<JackpotHit[]>([]);
@@ -85,6 +94,9 @@ export default function App() {
     s.on('disconnect', () => setLbOnline(false));
     s.on('machine_log', (entry: LogEntry) => {
       setLogEntries(prev => [...prev, entry].slice(-1000));
+    });
+    s.on('jackpot_pool_update', (data: any) => {
+      if (typeof data.pool === 'number') setJpPool(data.pool);
     });
     s.on('machine_update', (data: any) => {
       setMachines(prev => prev.map(m =>
@@ -261,26 +273,27 @@ export default function App() {
 
   const handleStart = async () => {
     // Push jackpot config + mode before starting
-    const floorCents   = Math.round((parseFloat(jpFloor)   || 100) * 100);
-    const ceilingCents = Math.round((parseFloat(jpCeiling) || 300) * 100);
+    const initialCents = Math.round((parseFloat(jpInitial) || 100) * 100);
+    const minCents      = Math.round((parseFloat(jpMin)     || 100) * 100);
+    const maxCents      = Math.round((parseFloat(jpMax)     || 300) * 100);
     const numHits      = Math.max(1, parseInt(jpNumHits) || 1);
     setJackpotMode(jpMode).catch(() => {});
     if (jpMode === 'virtual') {
       setVirtualJackpotConfig({
-        floor: floorCents, ceiling: ceilingCents,
+        initial: initialCents, min: minCents, max: maxCents,
         tickIncrement: parseInt(vjpTick) || 5,
         numHits,
         enabled: true,
       }).catch(() => {});
     } else {
       setRealJackpotConfig({
-        floor: floorCents, ceiling: ceilingCents,
+        initial: initialCents, min: minCents, max: maxCents,
         rate: parseFloat(jpRate) || 0.5,
         numHits,
       }).catch(() => {});
       // Disable virtual JP when mode is real
       setVirtualJackpotConfig({
-        floor: floorCents, ceiling: ceilingCents,
+        initial: initialCents, min: minCents, max: maxCents,
         tickIncrement: parseInt(vjpTick) || 5,
         numHits,
         enabled: false,
@@ -400,7 +413,7 @@ export default function App() {
   }, []);
 
   const loadLogs = useCallback(() => {
-    getLogs('all', 500).then(setLogEntries).catch(() => {});
+    getLogs('all').then(setLogEntries).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -454,7 +467,10 @@ export default function App() {
           </div>
           <div style={s.headerTitle}>SLOT TOURNAMENT</div>
         </div>
-        <span style={s.headerVer}>{APP_VERSION}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <JackpotOdometer pool={jpPoolSmoothed} />
+          <span style={s.headerVer}>{APP_VERSION}</span>
+        </div>
       </div>
 
       {/* ── B. Initial Settings ──────────────────────────────── */}
@@ -544,18 +560,27 @@ export default function App() {
               ))}
             </div>
 
-            {/* Floor / Ceiling — shared for both modes */}
+            {/* Initial / Min / Max — shared for both modes. Initial is where
+                the pool starts/resets to; Min/Max clamp the eventual payout
+                (a hit is guaranteed to land somewhere in [Min, Max]). */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Floor $</span>
-              <input type="number" value={jpFloor}
-                onChange={e => setJpFloor(e.target.value)}
+              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Initial $</span>
+              <input type="number" value={jpInitial}
+                onChange={e => setJpInitial(e.target.value)}
                 min="1" disabled={tournamentActive}
                 style={{ width: 60, opacity: tournamentActive ? 0.4 : 1 }} />
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Ceiling $</span>
-              <input type="number" value={jpCeiling}
-                onChange={e => setJpCeiling(e.target.value)}
+              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Min $</span>
+              <input type="number" value={jpMin}
+                onChange={e => setJpMin(e.target.value)}
+                min="1" disabled={tournamentActive}
+                style={{ width: 60, opacity: tournamentActive ? 0.4 : 1 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <span style={{ ...s.fieldLabel, whiteSpace: 'nowrap' }}>Max $</span>
+              <input type="number" value={jpMax}
+                onChange={e => setJpMax(e.target.value)}
                 min="1" disabled={tournamentActive}
                 style={{ width: 60, opacity: tournamentActive ? 0.4 : 1 }} />
             </div>
@@ -1042,7 +1067,7 @@ function MachineRow({
 // in the JSX above) since each column needs its own scroll ref.
 function LogColumn({ machine, entries }: { machine: Machine; entries: LogEntry[] }) {
   const ref = useRef<HTMLDivElement>(null);
-  const mine = entries.filter(e => e.machineId === machine.machine_id).slice(-100);
+  const mine = entries.filter(e => e.machineId === machine.machine_id).slice(-MAX_LOGS_PER_MACHINE);
 
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
