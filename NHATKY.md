@@ -1001,3 +1001,59 @@
   thân không có vấn đề (self-test vẫn PASS), chỉ tài liệu đấu dây sai.
 
 ---
+
+## 2026-09-17 (Thứ 5)
+
+- **Đọc thành công một máy slot thật KHÁC** qua board EVO (COM7) — máy này tự
+  báo **asset number = 7** qua LP 0x73 query (khác hẳn máy "G4"/asset=318 đã
+  test hồi 2026-09-08). Xác nhận CRC hợp lệ 100% trên toàn bộ frame log được:
+  Credits (LP 0x1A, credits=0), Total Coin In (LP 0x11, 9.510.851 đơn vị raw =
+  $95.108,51), AFT Register query (asset=7, status=`NOT_REGISTERED` — bình
+  thường, chưa từng chạy AFT trên máy này).
+
+- **Fix nhỏ**: `exc_name()` (`sas_polling.cpp`) thiếu hẳn `case 0x00` — mã
+  "No activity" (phổ biến nhất, gần như mọi General Poll lúc idle) rơi vào
+  `default: "Unknown"`. Chỉ ảnh hưởng dòng debug console
+  (`RX(gp) decoded: 0x%02X = %s`, in mỗi 40ms khi bật `SAS_LOG_RAW_FRAMES`),
+  KHÔNG ảnh hưởng state machine thật (nhánh xử lý exception đã tự loại trừ
+  `SAS_EXC_NO_ACTIVITY` từ trước, không đi qua `exc_name()`). Thêm case, build
+  + flash (COM7, 921600 baud, thành công lần đầu) + verify trực tiếp qua log
+  thật: đã in đúng `0x00 = No activity`.
+
+- **Fix quan trọng hơn — Meters poll (LP 0xAF) báo "response CRC/parse error"
+  liên tục, mỗi ~1s/lần, trên máy asset=7 này.** Trace tay từng byte + verify
+  lại CRC-16/SAS bằng script Python độc lập (không tin luôn log firmware):
+  - Máy này trả **9-byte BCD cho mỗi giá trị meter** (dài hơn hẳn mọi máy đã
+    test trước đây) — response đầy đủ cho 3 meter (Coin In/Coin Out/Games
+    Played) cần `header(3)+game_number(2)+3×[code(2)+size(1)+value(9)]+crc(2)`
+    = **38 byte**.
+  - Buffer `resp_buf[32]` (dùng CHUNG cho Credits/Meters/Total-Coin-In/Handpay
+    trong `sas_polling_task()`) chỉ giữ được 32 byte — `sas_receive()` bị
+    `max_len` chặn cứng ở đó, không đọc hết phần còn lại đang nằm sẵn trên
+    dây. 2 byte cuối cùng đọc được thực chất là **code+size của meter thứ 3**
+    (Games Played, `0x0005`/`size=0x04`) bị `sas_parse_meters()` hiểu nhầm
+    thành CRC → luôn luôn mismatch, không phải lỗi dây/CRC thật.
+  - **Đáng chú ý**: đây có thể là manh mối cho nghi vấn cũ "máy 2026-09-05/
+    09-10 không bao giờ trả lời LP 0xAF" (xem CLAUDE.md, mục "Việc còn tồn
+    đọng") — chưa chắc máy đó thật sự không hỗ trợ; rất có thể cùng bị cắt
+    bởi buffer 32 byte này (chỉ là không có dòng log rõ ràng để lộ ra vì máy
+    đó có thể không trả lời gì thêm sau khi bị cắt, khác máy asset=7 này vẫn
+    trả đủ dữ liệu để lộ pattern). Chưa xác nhận được vì không còn quyền truy
+    cập máy cũ để test lại.
+  - **Sửa**: tăng `resp_buf` từ 32 → 48 byte (khớp quy ước các buffer long-poll
+    khác đã có sẵn trong cùng file, ví dụ `lp74_resp[48]`), đủ dư cho 38 byte
+    thực tế cần. Build OK.
+  - **Trạng thái**: fix `exc_name()` đã flash + verify xong trên máy asset=7.
+    Fix `resp_buf` mới build xong, **chưa flash lại** — COM7 bị ngắt kết nối
+    giữa phiên (FTDI rút/đổi cổng) trước khi kịp flash lần 2. Việc tiếp theo:
+    cắm lại FTDI, vào boot mode, flash lại, verify Meters poll hết báo lỗi
+    trên máy asset=7 này.
+
+- **Ghi chú môi trường (không phải lỗi project)**: phiên PowerShell của Claude
+  Code trên máy này thiếu `C:\Program Files\Git\cmd` trong `$env:PATH` (khác
+  Git Bash, nơi git có sẵn) → `pio` (cần git để xử lý platform
+  `espressif32`) báo "Git not found in PATH" cho tới khi thêm thủ công
+  `$env:PATH = "C:\Program Files\Git\cmd;" + $env:PATH` trong phiên đó. Dùng
+  Git Bash cho các lệnh `pio`/`git` tránh được vấn đề này hoàn toàn.
+
+---

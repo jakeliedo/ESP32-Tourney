@@ -78,6 +78,7 @@ static void hex_dump(const char* label, const uint8_t* data, size_t len) {
 // on real hardware and confirmed against Appendix A.
 static const char* exc_name(uint8_t exc) {
     switch (exc) {
+        case 0x00: return "No activity";
         case 0x11: return "Slot door OPENED";
         case 0x12: return "Slot door CLOSED";
         case 0x17: return "AC power applied";
@@ -276,6 +277,13 @@ static size_t sas_general_poll(uint8_t machine_address, uint8_t* out_exc) {
 #if SAS_LOG_RAW_FRAMES
     if (received > 0) {
         hex_dump("SAS RX(gp)", out_exc, received);
+        // Plain-English translation of the exception byte, printed for
+        // EVERY poll cycle (not deduped like the state-machine's own
+        // exception logging further down) -- this is purely for live
+        // hardware bring-up/manual testing on the serial console, so a
+        // repeated code (e.g. this project's known 0x1F quirk, see
+        // exc_name()) is still visible each time, not just on change.
+        ESP_LOGI(TAG, "RX(gp) decoded: 0x%02X = %s", out_exc[0], exc_name(out_exc[0]));
     } else {
         ESP_LOGI(TAG, "SAS RX(gp): no response (timeout %dms)", SAS_RESPONSE_TIMEOUT);
     }
@@ -782,6 +790,48 @@ static uint32_t credits_to_cents(uint32_t raw_credits) {
     return (uint32_t)(((uint64_t)raw_credits * s_denom_value_x10000) / 100);
 }
 
+// ── Asset Number query (LP 0x73, read-only) ──────────────────────
+
+/**
+ * Query the machine's currently-configured Asset Number (LP 0x73,
+ * reg_code=AFT_REG_CODE_QUERY) purely for diagnostics -- read-only, does
+ * NOT perform AFT registration (no init/complete steps, no key exchange,
+ * no s_aft_registered side effect). Exists so the asset number shows up
+ * in the serial log at boot even if no AFT transfer is ever triggered;
+ * perform_aft_registration()'s own step 0 does the same query
+ * independently when a real AFT transfer actually needs it.
+ * Returns the asset number, or 0 if the machine has none configured / did
+ * not respond / sent an invalid frame.
+ */
+static uint32_t query_asset_number() {
+    uint8_t frame[36];
+    uint8_t resp[40];
+    uint8_t zero_key[20] = {0};
+
+    size_t frame_len = sas_build_lp_aft_register(frame, g_machine_id, AFT_REG_CODE_QUERY, 0, zero_key, 0);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+    if (n == 0) {
+        ESP_LOGW(TAG, "Asset number query: no response from machine");
+        return 0;
+    }
+
+    SasAftRegisterResponse q = sas_parse_aft_register(resp, n);
+    if (!q.valid) {
+        ESP_LOGW(TAG, "Asset number query: response CRC/parse error (n=%d)", (int)n);
+        return 0;
+    }
+
+    if (q.asset_number == 0) {
+        ESP_LOGW(TAG, "Asset number query: machine has none configured (returned 0) "
+                      "-- an operator must set one in the audit menu");
+        return 0;
+    }
+
+    ESP_LOGI(TAG, "Asset number query: machine reports %lu", (unsigned long)q.asset_number);
+    return q.asset_number;
+}
+
 // ── Ticket lockdown (LP 0x7B) ────────────────────────────────────
 
 /**
@@ -951,7 +1001,17 @@ void sas_polling_task(void* pvParameters) {
     // the LP 0xAF meters request (game_number + 3 meter codes) now needs
     // 13 bytes, up from the old bare 4-byte (unpayloaded, broken) version.
     uint8_t  lp_frame[16];
-    uint8_t  resp_buf[32];
+    // resp_buf was 32 bytes -- too small for a real LP 0xAF Meters response:
+    // this project's real test machine (2026-09-17) returns a 9-byte BCD
+    // value per meter (not the 4-5 byte value assumed elsewhere), so a
+    // 3-meter response is addr+cmd+length(3) + game_number(2) +
+    // 3*(code(2)+size(1)+value(9)) + CRC(2) = 38 bytes. The old 32-byte cap
+    // silently truncated `sas_receive()`'s read mid-value, and the leftover
+    // bytes of the 3rd meter's code/size got misread as the CRC -- causing
+    // "Meters poll: response CRC/parse error" on every single poll, not a
+    // real wire/CRC problem. 48 matches this file's other long-poll response
+    // buffers (e.g. lp74_resp[48]) with headroom over the 38 observed.
+    uint8_t  resp_buf[48];
     uint32_t last_credits  = 0;
     uint32_t last_coin_in  = 0;
     uint32_t last_coin_out = 0;
@@ -1019,6 +1079,12 @@ void sas_polling_task(void* pvParameters) {
     }
     for (int attempt = 0; attempt < 3 && !s_denom_known; attempt++) {
         query_machine_denom();
+    }
+    // Query the machine's Asset Number once, purely for diagnostics --
+    // see query_asset_number() for why this doesn't touch AFT
+    // registration state. A few retries for the same reason as above.
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (query_asset_number() != 0) break;
     }
     // Lock down ticket cashout/redemption -- see set_ticket_printing() for
     // why. A few retries for the same reason as the queries above.
@@ -1214,6 +1280,16 @@ void sas_polling_task(void* pvParameters) {
                     ESP_LOGI(TAG, "Machine online → IDLE");
                 }
                 uint32_t cr_cents = credits_to_cents(cr.credits);
+#if SAS_LOG_RAW_FRAMES
+                // Plain-English translation printed on EVERY poll (~200ms),
+                // unlike "Credits: ..." below which only logs on change --
+                // this is purely for live hardware bring-up on the serial
+                // console, so the RX hex dump above always has a matching
+                // decoded line right under it.
+                ESP_LOGI(TAG, "RX decoded: Credits = %lu ($%lu.%02lu)",
+                         (unsigned long)cr_cents,
+                         (unsigned long)(cr_cents / 100), (unsigned long)(cr_cents % 100));
+#endif
                 if (cr_cents != last_credits) {
                     int32_t delta = (int32_t)cr_cents - (int32_t)last_credits;
                     ESP_LOGI(TAG, "Credits: %lu raw (denom-converted %lu) (%+ld)  $%lu.%02lu",
@@ -1348,6 +1424,21 @@ void sas_polling_task(void* pvParameters) {
                     ESP_LOGW(TAG, "Total Coin In poll (LP 0x11): response CRC/parse error (n=%d)", (int)n);
                 }
             }
+        }
+
+        // Asset Number (LP 0x73, query-only) -- repeated instead of only
+        // the 3 attempts at boot, per explicit request (2026-09-17): during
+        // live hardware bring-up the SAS cable may get connected/
+        // reconnected to the machine AFTER this board has already booted,
+        // so a boot-only query can permanently miss it for the rest of the
+        // session. ~1s cadence (bumped up from an initial ~5s per
+        // follow-up request), same as Meters/Total Coin In above.
+        // query_asset_number() already logs the result (or a warning)
+        // unconditionally on every call.
+        static uint8_t asset_number_tick = 0;
+        if (++asset_number_tick >= 25) {  // every 25 cycles (~1s)
+            asset_number_tick = 0;
+            query_asset_number();
         }
 
         // ── 4b. Periodic pending-AFT retry (2026-09-10) ──────────
