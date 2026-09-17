@@ -14,6 +14,8 @@ frontend/control-panel/node_modules/
 frontend/control-panel/dist/
 frontend/leaderboard/node_modules/
 frontend/leaderboard/dist/
+frontend/diagnostics/node_modules/
+frontend/diagnostics/dist/
 
 # ── Docker / Runtime data ────────────────────────────────────
 mosquitto/data/

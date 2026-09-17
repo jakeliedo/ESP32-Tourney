@@ -19,6 +19,20 @@ import { LeaderboardGateway, LogEntry } from './leaderboard.gateway';
 // N entries, independently for the "all" and "abnormal" backlogs.
 export const MAX_LOGS_PER_MACHINE = 12;
 
+// Machine-diagnostics thresholds (2026-09-17). Hardcoded for v1 (not yet a
+// settings API) -- see sas_commands.h's SAS_FEATURE_* for the bit layout
+// this mirrors (must match the firmware's combined
+// features1|features2<<8|features3<<16 encoding exactly).
+// SAS_FEATURE_AFT_SUPPORTED = Features2 bit6 (combined bit 8+6=14) --
+// the one thing this project's AFT-only cash flow actually depends on.
+export const SAS_FEATURE_AFT_SUPPORTED = 1 << 14;
+export const REQUIRED_FEATURE_MASK = SAS_FEATURE_AFT_SUPPORTED;
+// A machine reporting a cash-out limit below MIN_CASH_OUT_LIMIT_CENTS may
+// force a handpay instead of a full AFT payout during a tournament. Venue-
+// specific (only the operator knows real tournament payout tiers), so this
+// is read from .env (see onModuleInit below), not a hardcoded dollar
+// figure -- 0/unset disables the check.
+
 interface TelemetryPayload {
   machine_id: string;
   exception: number;
@@ -30,11 +44,23 @@ interface TelemetryPayload {
   txn_id?: string;
   bv_enabled?: boolean;
   printer_enabled?: boolean;
+  enabled_features?: number;
+  cash_out_limit_cents?: number;
+  rte_guard_ok?: boolean;
+  bill_config_ok?: boolean;
+  last_cycle_overrun_ms?: number;
+  serial_number?: string;
+  sas_version?: string;
+  denom_code?: number;
+  denom_value_x10000?: number;
+  asset_number?: number;
+  aft_registered?: boolean;
 }
 
 interface ServerCommand {
   type: 'AFT_PUMP' | 'AFT_WITHDRAW' | 'LOCK' | 'UNLOCK' | 'DISABLE' | 'ENABLE'
-      | 'ENABLE_BV' | 'DISABLE_BV' | 'ENABLE_PRINTER' | 'DISABLE_PRINTER';
+      | 'ENABLE_BV' | 'DISABLE_BV' | 'ENABLE_PRINTER' | 'DISABLE_PRINTER'
+      | 'REFRESH_DIAGNOSTICS';
   amount?: number;
   txn_id?: string;
 }
@@ -47,6 +73,19 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
   private lastStatus   = new Map<string, MachineStatus>();
   private lastBv       = new Map<string, boolean>();
   private lastPrinter  = new Map<string, boolean>();
+  // Machine-diagnostics transition trackers (2026-09-17) -- same
+  // "only log on change, not every telemetry tick" discipline as
+  // lastBv/lastPrinter above. last_cycle_overrun_ms needs no such map:
+  // firmware already only reports it non-zero once per new overrun (see
+  // sas_polling.cpp's report-and-clear comment), so a plain `>0` check in
+  // processTelemetry is sufficient there.
+  private lastFeaturesOk  = new Map<string, boolean>();
+  private lastCashOutOk   = new Map<string, boolean>();
+  private lastRteGuardOk  = new Map<string, boolean>();
+  private lastBillConfigOk = new Map<string, boolean>();
+  // Venue-specific floor for LP 0xA4 Cash Out Limit, from .env
+  // (MIN_CASH_OUT_LIMIT_CENTS) -- 0 disables the check. Set in onModuleInit.
+  private minCashOutLimitCents = 0;
   // Per-machine processing queue: `client.on('message', ...)` below fires
   // handleMessage() without awaiting it, and mqtt.js does not wait for a
   // listener's promise before delivering the next message -- so a status
@@ -81,6 +120,7 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
     const port = +this.cfg.get('MQTT_PORT', 1883);
     const user = this.cfg.get('MQTT_USER');
     const pass = this.cfg.get('MQTT_PASS');
+    this.minCashOutLimitCents = +this.cfg.get('MIN_CASH_OUT_LIMIT_CENTS', 0);
 
     this.client = mqtt.connect(`mqtt://${host}:${port}`, {
       username: user,
@@ -183,6 +223,31 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
         coin_in: data.coin_in,
         coin_out: data.coin_out,
         status: this.stateToStatus(data.state),
+        // Persisted alongside the diagnostics fields (2026-09-17) so a
+        // plain REST client with no WebSocket connection can still see
+        // them -- see machine.entity.ts's comment for why this duplicates
+        // what broadcastMachineUpdate() already sends live.
+        bv_enabled:      data.bv_enabled      ?? null,
+        printer_enabled: data.printer_enabled ?? null,
+        // Machine-diagnostics fields (2026-09-17) -- firmware always sends
+        // these (0/false until its boot-time query succeeds, not omitted),
+        // so writing them every tick is safe and matches how
+        // credits/coin_in/coin_out are already written unconditionally.
+        enabled_features:      data.enabled_features      ?? null,
+        cash_out_limit_cents:  data.cash_out_limit_cents   ?? null,
+        rte_guard_ok:          data.rte_guard_ok           ?? null,
+        bill_config_ok:        data.bill_config_ok         ?? null,
+        last_cycle_overrun_ms: data.last_cycle_overrun_ms  ?? null,
+        // Identity/config fields (2026-09-17) -- firmware omits
+        // serial_number/sas_version from the JSON entirely until known
+        // (empty-string guard in mqtt_client.cpp), so these are genuinely
+        // `undefined` (not just falsy) pre-boot-query; `?? null` covers both.
+        serial_number:      data.serial_number      ?? null,
+        sas_version:        data.sas_version        ?? null,
+        denom_code:         data.denom_code         ?? null,
+        denom_value_x10000: data.denom_value_x10000 ?? null,
+        asset_number:       data.asset_number       ?? null,
+        aft_registered:     data.aft_registered     ?? null,
       },
       ['machine_id'],
     );
@@ -253,6 +318,54 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
         );
       }
       this.lastPrinter.set(machineId, data.printer_enabled);
+    }
+
+    // Machine-diagnostics detectors (2026-09-17) -- same transition-only
+    // discipline as BV/printer above, so a machine that's been missing a
+    // feature/under the cash-out floor/failing a guard for hours doesn't
+    // flood the Logs tab on every telemetry tick.
+    if (data.enabled_features !== undefined) {
+      const ok = (data.enabled_features & REQUIRED_FEATURE_MASK) === REQUIRED_FEATURE_MASK;
+      const prevOk = this.lastFeaturesOk.get(machineId);
+      if (prevOk !== undefined && prevOk && !ok) {
+        log('abnormal', 'FEATURE_UNSUPPORTED', 'Machine reports missing a required SAS feature (LP 0xA0)');
+      }
+      this.lastFeaturesOk.set(machineId, ok);
+    }
+
+    if (data.cash_out_limit_cents !== undefined && this.minCashOutLimitCents > 0) {
+      const ok = data.cash_out_limit_cents >= this.minCashOutLimitCents;
+      const prevOk = this.lastCashOutOk.get(machineId);
+      if (prevOk !== undefined && prevOk && !ok) {
+        log('abnormal', 'CASH_OUT_LIMIT_LOW',
+          `Cash out limit ($${(data.cash_out_limit_cents / 100).toFixed(2)}) below configured floor`);
+      }
+      this.lastCashOutOk.set(machineId, ok);
+    }
+
+    if (data.rte_guard_ok !== undefined) {
+      const prevOk = this.lastRteGuardOk.get(machineId);
+      if (prevOk !== undefined && prevOk && !data.rte_guard_ok) {
+        log('abnormal', 'RTE_DISABLE_FAILED', 'Machine did not ACK the Real Time Event reporting OFF guard (LP 0x0E)');
+      }
+      this.lastRteGuardOk.set(machineId, data.rte_guard_ok);
+    }
+
+    if (data.bill_config_ok !== undefined) {
+      const prevOk = this.lastBillConfigOk.get(machineId);
+      if (prevOk !== undefined && prevOk && !data.bill_config_ok) {
+        log('abnormal', 'BILL_CONFIG_WRITE_FAILED', 'Machine did not ACK the bill-acceptor persistent-enable write (LP 0x08)');
+      }
+      this.lastBillConfigOk.set(machineId, data.bill_config_ok);
+    }
+
+    // No transition map needed here -- firmware only reports a non-zero
+    // value once per new overrun since its last report (report-and-clear,
+    // see sas_polling.cpp), so every non-zero reading is already a
+    // distinct, real event.
+    if (data.last_cycle_overrun_ms && data.last_cycle_overrun_ms > 0) {
+      log('info', 'POLL_CYCLE_OVERRUN',
+        `General-poll cycle overran by ${data.last_cycle_overrun_ms}ms (budget 40ms)`);
     }
 
     // Capped PER MACHINE (not one shared list across all machines) so a

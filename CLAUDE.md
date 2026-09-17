@@ -27,8 +27,11 @@ NestJS Backend (:3000)
   └─ Redis                — digital twin, jackpot pool, sorted-set scores
       ↕ WebSocket
 React Frontends
-  ├─ control-panel (:5173) — admin dashboard
-  └─ leaderboard   (:5174) — màn hình 4K real-time
+  ├─ control-panel (:5173) — admin dashboard (chạy tournament)
+  ├─ leaderboard   (:5174) — màn hình 4K real-time
+  └─ diagnostics   (:5175) — đọc trạng thái máy (2026-09-17), app RIÊNG,
+                              không phải tab trong control-panel — xem
+                              mục "Machine Diagnostics" bên dưới
 ```
 
 > **Lưu ý single-core:** ESP32-C3 chỉ có 1 core. Không dùng `xTaskCreatePinnedToCore` với core khác nhau — tất cả task đều pinned to Core 0, tách biệt bằng FreeRTOS priority thay vì core affinity. SAS task chạy `configMAX_PRIORITIES-1` (highest), MQTT task chạy priority 5 (medium), Watchdog chạy priority 1 (lowest). UART `uart_read_bytes` block/yield trong deadline window → MQTT task vẫn có CPU time.
@@ -94,7 +97,8 @@ ESP32-Tourney/
 │       └── watchdog/
 │           └── watchdog_task.h/cpp # 2s hardware watchdog, NVS pending txn recovery
 ├── backend/                    # NestJS — không đổi so với nhánh main
-├── frontend/                   # React — không đổi so với nhánh main
+├── frontend/                   # React — control-panel/leaderboard giống nhánh main;
+│                                # diagnostics/ (2026-09-17) là app RIÊNG chỉ có ở nhánh này
 ├── sim_esp32.py                # Simulator MQTT
 ├── Reader/                     # Passive SAS sniffer cho HOST THẬT khác (không phải EVO) — xem Reader/CLAUDE.md
 │   ├── CLAUDE.md                # Cách đấu dây tap, cách chạy, giới hạn đã biết
@@ -214,6 +218,7 @@ npm run start:dev        # :3000
 ```bash
 cd frontend/control-panel && npm install && npm run dev   # :5173
 cd frontend/leaderboard   && npm install && npm run dev   # :5174
+cd frontend/diagnostics   && npm install && npm run dev   # :5175
 ```
 
 ### Docker (services)
@@ -608,6 +613,40 @@ Trước đây log cho tab Logs (control-panel) lưu ở 2 Redis List **dùng ch
 
 ---
 
+## Machine Diagnostics (2026-09-17)
+
+Mở rộng bộ Long Poll SAS đang dùng (trước đó ~10/119 poll của SAS 6.02) thêm 3 poll phục vụ mục tiêu **phát hiện lỗi cấu hình trên máy + giao diện sửa/tắt/bật**, cộng thêm 1 chỉ số đo timing không thuộc SAS. Không cố phủ hết cả spec — hầu hết 65 poll meter và phần lớn 45 poll status/toggle còn lại không liên quan tới venue này (card/reel, progressive, chế độ tournament riêng của SAS xung đột với tournament logic của project, multi-denom/multi-game khi máy ở đây single-game/single-denom, config text/receipt chỉ ghi không đọc lại được).
+
+**3 Long Poll mới** (byte layout xác minh trực tiếp từ `SAS 6.02.pdf`, không suy đoán — xem comment trong `sas_commands.cpp`):
+- **LP 0xA0 Send Enabled Features** — hỏi máy có thật sự hỗ trợ AFT/ticket-redemption/40ms-poll-rate hay không (giải thích được các ca máy im lặng với 1 lệnh nào đó vì không hỗ trợ, như LP 0xAF từng không phản hồi trên 1 máy EGT).
+- **LP 0xA4 Send Cash Out Limit** — máy cấu hình giới hạn trả thưởng thấp hơn số tiền tournament cần trả sẽ ép handpay thay vì AFT full transfer. So với `MIN_CASH_OUT_LIMIT_CENTS` (`.env`, mặc định 0 = tắt check).
+- **LP 0x0E Enable/Disable RTE Reporting** — **chỉ ép về OFF lúc boot + định kỳ ~5 phút, không có nút bật ở UI** (kiến trúc polling của project này giả định General Poll cổ điển, RTE mode đổi hẳn format phản hồi mà codebase không parse được).
+
+**LP 0x08 bookkeeping**: SAS không có poll đọc lại cấu hình bill-denom đã ghi (0x08 write-only theo spec) — chỉ wire lại giá trị ACK/NACK của lần ghi gần nhất (`configure_bill_persistent_enable()`, trước đây bị bỏ qua) thành `bill_config_ok`, không phải readback thật.
+
+**Lệnh mới**: `CMD_REFRESH_DIAGNOSTICS` (=10, MQTT type `REFRESH_DIAGNOSTICS`) — operator bấm nút để ép query lại LP 0xA0/0xA4 + re-assert LP 0x0E off ngay, không cần reboot board.
+
+**Chẩn đoán timing chu kỳ poll (không phải SAS)**: máy MC07 từng đo được chu kỳ General Poll 48ms (vượt ngân sách 40ms) — điều tra xác nhận đây là hiện tượng **đã có từ trước, tự giới hạn** (`vTaskDelayUntil` không dồn lệch qua các chu kỳ), khớp với việc 1 long-poll nền (Credits/Meters/AFT/diagnostics) rơi đúng vào 1 chu kỳ General Poll. Thêm đo thời gian thực mỗi chu kỳ (`last_cycle_overrun_ms` trong `MachineEvent`) để phát hiện sớm máy/dây xuống cấp trước khi mất poll thật, log `POLL_CYCLE_OVERRUN` khi vượt ngưỡng.
+
+**Identity/config bổ sung (cùng đợt, để phục vụ "đọc hết thông số 1 máy")**: firmware đã tự query lúc boot nhưng trước đây KHÔNG gửi lên MQTT — nay forward luôn qua telemetry + persist vào `MachineEntity`: `serial_number`/`sas_version` (LP 0x54), `denom_code`/`denom_value_x10000` (LP 0x1F), `asset_number`/`aft_registered` (LP 0x73). Đồng thời persist luôn `bv_enabled`/`printer_enabled` (trước đây chỉ broadcast WebSocket, không có trong DB) — vì app `diagnostics` mới cố tình KHÔNG dùng socket.io (giữ đơn giản, độc lập), chỉ đọc REST `GET /api/machines` nên mọi thứ cần hiển thị phải nằm trong DB.
+
+**Persist ở DB (khác các field khác chỉ broadcast)**: tất cả field trên + `enabled_features`/`cash_out_limit_cents`/`rte_guard_ok`/`bill_config_ok`/`last_cycle_overrun_ms` đều nullable trong `MachineEntity` — vì chỉ refresh lúc boot/~5 phút/on-demand (không phải mỗi tick), persist để mở app Diagnostics lúc board vừa khởi động lại vẫn thấy giá trị gần nhất thay vì trống. Buffer JSON telemetry (`mqtt_client.cpp`) tăng từ 384→512 byte, `PubSubClient.setBufferSize()` tăng 512→768 để chứa đủ.
+
+**UI — app RIÊNG, không phải tab trong control-panel** (`frontend/diagnostics`, port **:5175**). Quyết định sau khi cân nhắc trực tiếp với người dùng: ban đầu định làm 1 tab mới trong `control-panel` (App.tsx), nhưng bị coi là "chen ngang" vào công cụ chạy tournament — React không có Error Boundary, 1 bug ở tab Diagnostics có thể kéo sập cả UI Start/Stop tournament. Tách hẳn thành project Vite/React độc lập (`package.json`/`vite.config.ts`/`index.html` riêng, không import gì từ `control-panel`, không dùng socket.io), chỉ gọi chung REST API backend (`GET /api/machines`, `POST /api/machines/:id/command {type:'REFRESH_DIAGNOSTICS'}`) — bug ở app này không bao giờ ảnh hưởng được control-panel đang chạy tournament thật.
+
+**Layout — đọc 1 máy 1 lúc, không phải dashboard nhiều máy** (chốt sau khi người dùng làm rõ ý đồ thật: "chỉ đọc hết tất cả thông số của 1 máy một lần... hiển thị theo kiểu khoa học, cho người kỹ thuật nhìn thấy rõ" — bản đầu làm card lưới nhiều máy bị thay bằng thiết kế này): 1 dropdown chọn máy (mọi trạng thái, kể cả offline — kỹ thuật viên có thể cần xem lại cấu hình máy đã tắt) → bên dưới 1 bảng thông số chia nhóm rõ ràng cho đúng máy đó:
+- **Identity**: Machine ID, Display Name, SAS Version, Serial Number, Asset Number, AFT Registered
+- **Denomination**: Denom Code (hex), Denom Value ($)
+- **Live State**: Status, Credits, Coin In, Coin Out
+- **Guards/Config Checks**: BV Enabled, Printer Lock, RTE Guard, Bill Config, Cash-Out Limit, Poll-cycle health
+- **Enabled Features (LP 0xA0) — giải mã ĐẦY ĐỦ từng bit**, không chỉ mỗi AFT: cả 13 cờ tính năng (jackpot multiplier, AFT bonus, legacy bonus, tournament, validation extensions, ticket redemption, tickets-in-drop, extended meters, component auth, AFT, multi-denom, 40ms-poll-rate, multi-progressive-win-reporting) + validation style (2-bit) + meter model (2-bit) — đúng tinh thần "hiển thị khoa học cho kỹ thuật viên", không rút gọn chỉ 1 badge tổng.
+
+Nút refresh cho máy đang chọn (không phải "refresh tất cả"). Định hướng tương lai người dùng nêu: phát triển thành thiết bị cầm tay/portable để kiểm tra nhanh không cần máy tính — layout đã thiết kế đơn giản/touch-friendly (nút to, xếp dọc, 1 máy 1 màn hình) sẵn cho việc đó.
+
+Test: `firmware/test/test_sas_commands/test_main.cpp` (unit test builder/parser đầu tiên của `sas_commands.cpp` — trước đó chỉ CRC + parity được test).
+
+---
+
 ## Cấu hình Firmware (config.h)
 
 **Tất cả pin DM9051 là internal traces — KHÔNG chỉnh.**
@@ -640,6 +679,7 @@ Các define còn thực sự nằm trong `config.h` và có thể cần chỉnh:
 | `JACKPOT_BASE_AMOUNT` | 10000 | `min` — sàn trả thưởng, hit không bao giờ trả thấp hơn giá trị này |
 | `JACKPOT_INITIAL_AMOUNT` | = `JACKPOT_BASE_AMOUNT` nếu bỏ trống | `initial` — giá trị pool ngay sau khi reset (đầu round / sau 1 lần rớt); có thể thấp hơn `min` để pool "leo" từ coin-in thật lên tới min/max thay vì bắt đầu sẵn ở sàn |
 | `JACKPOT_MAX_AMOUNT` | 1000000 | `max` — trần trả thưởng |
+| `MIN_CASH_OUT_LIMIT_CENTS` | 0 (tắt check) | Sàn tối thiểu chấp nhận được cho LP 0xA4 Cash Out Limit của máy — dưới mức này có thể bị handpay thay vì AFT full transfer khi trả thưởng tournament. Xem mục "Machine Diagnostics" bên dưới. |
 
 **2026-09-16 — tách `floor` cũ thành `initial`/`min`/`max` riêng biệt** (trước đó 1 giá trị `floor` vừa là điểm reset vừa là sàn trả thưởng). Chi tiết đầy đủ (ramp trước khi rớt, reset khi STOP) xem mục **"Jackpot: initial/min/max, ramp, reset-on-cancel (2026-09-16)"** bên dưới.
 

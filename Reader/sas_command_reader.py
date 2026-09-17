@@ -72,6 +72,7 @@ LP_NAMES = {
     0x02: "Startup (Enable Play)",
     0x06: "Enable Bill Acceptor",
     0x07: "Disable Bill Acceptor",
+    0x0E: "Enable/Disable Real Time Event Reporting",
     0x11: "Total Coin In Meter",
     0x1A: "Current Credit Meter",
     0x1B: "Handpay Information",
@@ -83,6 +84,8 @@ LP_NAMES = {
     0x74: "AFT Game Lock and Status",
     0x7B: "Extended Validation Status",
     0xAF: "Extended Meters",
+    0xA0: "Send Enabled Features",
+    0xA4: "Send Cash Out Limit",
 }
 
 # ── Exception codes (General Poll responses) -- ported from exc_name() in sas_polling.cpp ──
@@ -158,6 +161,20 @@ def decode_frame(frame: bytes, direction: str) -> str:
     # Bare Type-S commands: [addr][cmd][crc_l][crc_h], no data at all.
     if cmd in (0x01, 0x02, 0x06, 0x07) and n == 4:
         return tag
+
+    # LP 0x0E Enable/Disable RTE Reporting: [addr][cmd][flag:0/1][crc_l][crc_h],
+    # 5 bytes, no length byte (verified 2026-09-17 against SAS 6.02 Table 12.1).
+    if cmd == 0x0E and n == 5:
+        flag = frame[2]
+        return tag + f" {'ENABLE' if flag else 'DISABLE'} RTE reporting (flag=0x{flag:02X})"
+
+    # LP 0xA0/0xA4: request = [addr][cmd][game_number:2 BCD][crc_l][crc_h],
+    # 6 bytes, no length byte (verified 2026-09-17 against SAS 6.02 Tables
+    # 7.14a/7.16a). Response layouts (12 / 8 bytes respectively) are fixed-
+    # size too but not decoded here yet -- this tool is for host requests.
+    if cmd in (0xA0, 0xA4) and n == 6:
+        game_number = bcd_to_int(frame[2:4])
+        return tag + f" game_number={game_number} (request)"
 
     # LP 0x1A / 0x11: request = 4 bytes bare; response = 8 bytes with 4-byte BCD meter.
     if cmd in (0x1A, 0x11):
@@ -274,6 +291,28 @@ def _selftest() -> int:
     got = decode_frame(bytes(aft), "host")
     if "transfer_code=FULL" not in got or "amount_credits=12345" not in got:
         print(f"[FAIL] AFT 0x72 decode: {got}")
+        failures += 1
+    else:
+        print(f"[ ok ] {got}")
+
+    # LP 0x0E RTE reporting disable, built by hand per SAS 6.02 Table 12.1.
+    rte = bytearray([0x01, 0x0E, 0x00])
+    crc = crc16_sas(bytes(rte))
+    rte += bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+    got = decode_frame(bytes(rte), "host")
+    if "DISABLE RTE reporting" not in got:
+        print(f"[FAIL] LP 0x0E decode: {got}")
+        failures += 1
+    else:
+        print(f"[ ok ] {got}")
+
+    # LP 0xA0 Send Enabled Features request, game_number=0000, per Table 7.14a.
+    a0 = bytearray([0x01, 0xA0, 0x00, 0x00])
+    crc = crc16_sas(bytes(a0))
+    a0 += bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+    got = decode_frame(bytes(a0), "host")
+    if "game_number=0" not in got or "LP 0xA0" not in got:
+        print(f"[FAIL] LP 0xA0 decode: {got}")
         failures += 1
     else:
         print(f"[ ok ] {got}")

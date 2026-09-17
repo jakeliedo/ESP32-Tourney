@@ -53,7 +53,39 @@ def get_active_machines():
 MACHINES = get_active_machines()
 
 # ── Per-machine state ─────────────────────────────────────────
-state = {mid: {"coin_in": 0, "credits": 0, "locked": True, "disabled": True} for mid in MACHINES}
+# bv_enabled/printer_enabled defaults mirror firmware's own boot defaults
+# (sas_polling.cpp: bv starts true, printer starts false to match the
+# boot-time ticket lockdown). enabled_features/cash_out_limit_cents/
+# rte_guard_ok/bill_config_ok simulate a well-configured machine (2026-09-17
+# machine-diagnostics feature) -- see CLAUDE.md's "Machine Diagnostics".
+SAS_FEATURE_AFT_SUPPORTED      = 1 << 14
+SAS_FEATURE_TICKET_REDEMPTION  = 1 << 7
+SAS_FEATURE_MAX_POLL_RATE_40MS = 1 << 16
+SIMULATED_ENABLED_FEATURES = (
+    SAS_FEATURE_AFT_SUPPORTED | SAS_FEATURE_TICKET_REDEMPTION | SAS_FEATURE_MAX_POLL_RATE_40MS
+)
+
+def _default_state(mid: str = "MC00"):
+    # Identity/config fields (2026-09-18) -- simulate a real machine's
+    # already-boot-queried values (LP 0x54/0x1F/0x73) so the single-machine
+    # "read everything" view (frontend/diagnostics) has something realistic
+    # to show without needing real hardware.
+    return {
+        "coin_in": 0, "credits": 0, "locked": True, "disabled": True,
+        "bv_enabled": True, "printer_enabled": False,
+        "enabled_features": SIMULATED_ENABLED_FEATURES,
+        "cash_out_limit_cents": 500000,  # $5000.00
+        "rte_guard_ok": True, "bill_config_ok": True,
+        "last_cycle_overrun_ms": 0,
+        "serial_number": f"SIM-{mid}-0001",
+        "sas_version": "602",
+        "denom_code": 1,           # $0.01 per Table C-4
+        "denom_value_x10000": 100,  # $0.01 * 10000
+        "asset_number": (abs(hash(mid)) % 90000) + 10000,
+        "aft_registered": True,
+    }
+
+state = {mid: _default_state(mid) for mid in MACHINES}
 
 # ── MQTT callbacks ────────────────────────────────────────────
 def on_connect(client, userdata, flags, rc, props=None):
@@ -71,7 +103,7 @@ def on_message(client, userdata, msg):
             return
         mid = parts[2]
         if mid not in state:
-            state[mid] = {"coin_in": 0, "credits": 0, "locked": False, "disabled": False}
+            state[mid] = _default_state(mid)
 
         payload = json.loads(msg.payload)
         cmd = payload.get('type', '')
@@ -96,7 +128,28 @@ def on_message(client, userdata, msg):
         elif cmd == 'ENABLE':
             state[mid]['disabled'] = False
             state[mid]['locked'] = False
+            state[mid]['bv_enabled'] = True
             print(f"\n[CMD] ENABLE    {mid}  (LP 0x02 + LP 0x06)")
+        elif cmd == 'ENABLE_BV':
+            state[mid]['bv_enabled'] = True
+            print(f"\n[CMD] ENABLE_BV {mid}  (LP 0x06)")
+        elif cmd == 'DISABLE_BV':
+            state[mid]['bv_enabled'] = False
+            print(f"\n[CMD] DISABLE_BV {mid}  (LP 0x07)")
+        elif cmd == 'ENABLE_PRINTER':
+            state[mid]['printer_enabled'] = True
+            print(f"\n[CMD] ENABLE_PRINTER  {mid}  (LP 0x7B)")
+        elif cmd == 'DISABLE_PRINTER':
+            state[mid]['printer_enabled'] = False
+            print(f"\n[CMD] DISABLE_PRINTER {mid}  (LP 0x7B)")
+        elif cmd == 'REFRESH_DIAGNOSTICS':
+            # Real firmware re-queries LP 0xA0/0xA4 + re-asserts LP 0x0E off;
+            # simulator just re-confirms the same canned "healthy" values.
+            state[mid]['enabled_features']     = SIMULATED_ENABLED_FEATURES
+            state[mid]['cash_out_limit_cents']  = 500000
+            state[mid]['rte_guard_ok']          = True
+            state[mid]['bill_config_ok']        = True
+            print(f"\n[CMD] REFRESH_DIAGNOSTICS {mid}")
     except Exception as e:
         print(f"\n[CMD] Parse error: {e}")
 
@@ -161,7 +214,20 @@ while True:
             "state": sim_state,
             "exception": 0,
             "txn_id": "",
-            "aft_status": 0
+            "aft_status": 0,
+            "bv_enabled": state[mid]['bv_enabled'],
+            "printer_enabled": state[mid]['printer_enabled'],
+            "enabled_features": state[mid]['enabled_features'],
+            "cash_out_limit_cents": state[mid]['cash_out_limit_cents'],
+            "rte_guard_ok": state[mid]['rte_guard_ok'],
+            "bill_config_ok": state[mid]['bill_config_ok'],
+            "last_cycle_overrun_ms": state[mid]['last_cycle_overrun_ms'],
+            "serial_number": state[mid]['serial_number'],
+            "sas_version": state[mid]['sas_version'],
+            "denom_code": state[mid]['denom_code'],
+            "denom_value_x10000": state[mid]['denom_value_x10000'],
+            "asset_number": state[mid]['asset_number'],
+            "aft_registered": state[mid]['aft_registered'],
         }))
 
     top = sorted(state.items(), key=lambda x: -x[1]['credits'])

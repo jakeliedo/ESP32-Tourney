@@ -62,6 +62,7 @@ static void on_message(char* topic, uint8_t* payload, unsigned int length) {
     else if (strcmp(type, "DISABLE_BV")   == 0) cmd.cmd_type = CMD_DISABLE_BV;
     else if (strcmp(type, "ENABLE_PRINTER")  == 0) cmd.cmd_type = CMD_ENABLE_PRINTER;
     else if (strcmp(type, "DISABLE_PRINTER") == 0) cmd.cmd_type = CMD_DISABLE_PRINTER;
+    else if (strcmp(type, "REFRESH_DIAGNOSTICS") == 0) cmd.cmd_type = CMD_REFRESH_DIAGNOSTICS;
     else {
         ESP_LOGW(TAG, "Unknown command type: %s", type);
         return;
@@ -131,7 +132,7 @@ static void publish_identity_if_known() {
 // ── Report_Queue → JSON serialiser ────────────────────────────
 
 static void serialize_and_publish(const MachineEvent* ev) {
-    StaticJsonDocument<256> doc;
+    StaticJsonDocument<512> doc;
     doc["machine_id"] = g_mqtt_client_id;
     doc["exception"]  = ev->exception_code;
     doc["credits"]    = ev->credits;
@@ -141,9 +142,25 @@ static void serialize_and_publish(const MachineEvent* ev) {
     doc["aft_status"] = ev->aft_status;
     doc["bv_enabled"]      = ev->bv_enabled;
     doc["printer_enabled"] = ev->printer_enabled;
+    // Machine-diagnostics fields (2026-09-17) -- see sas_polling.h's
+    // MachineEvent/getters for the "0/false may mean not-yet-known" caveat.
+    doc["enabled_features"]      = ev->enabled_features;
+    doc["cash_out_limit_cents"]  = ev->cash_out_limit_cents;
+    doc["rte_guard_ok"]          = ev->rte_guard_ok;
+    doc["bill_config_ok"]        = ev->bill_config_ok;
+    doc["last_cycle_overrun_ms"] = ev->last_cycle_overrun_ms;
+    // Identity/config fields (2026-09-17) -- for the single-machine "read
+    // everything" technical view (frontend/diagnostics). Empty string /
+    // 0 / false = not yet queried, same caveat as above.
+    if (ev->serial_number[0] != '\0') doc["serial_number"] = ev->serial_number;
+    if (ev->sas_version[0]   != '\0') doc["sas_version"]   = ev->sas_version;
+    doc["denom_code"]         = ev->denom_code;
+    doc["denom_value_x10000"] = ev->denom_value_x10000;
+    doc["asset_number"]       = ev->asset_number;
+    doc["aft_registered"]     = ev->aft_registered;
     if (ev->txn_id[0] != '\0') doc["txn_id"] = ev->txn_id;
 
-    char buf[256];
+    char buf[512];
     serializeJson(doc, buf, sizeof(buf));
     s_mqtt.publish(g_topic_telemetry, buf);
     led_pulse_network();  // real outbound MQTT traffic -- see led_indicator.h
@@ -185,7 +202,12 @@ void mqtt_client_init() {
     s_mqtt.setServer(MQTT_BROKER_HOST, MQTT_BROKER_PORT);
     s_mqtt.setCallback(on_message);
     s_mqtt.setKeepAlive(MQTT_KEEPALIVE);
-    s_mqtt.setBufferSize(512);
+    // 2026-09-17: bumped from 512 -- telemetry payload itself can now reach
+    // ~450-500 bytes (identity/config fields added for the single-machine
+    // diagnostics view), and this buffer must also fit the MQTT fixed/
+    // variable header + topic string on top of the JSON payload, not just
+    // the payload alone.
+    s_mqtt.setBufferSize(768);
 }
 
 void mqtt_task_start() {

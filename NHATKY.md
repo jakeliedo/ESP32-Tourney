@@ -1056,4 +1056,73 @@
   `$env:PATH = "C:\Program Files\Git\cmd;" + $env:PATH` trong phiên đó. Dùng
   Git Bash cho các lệnh `pio`/`git` tránh được vấn đề này hoàn toàn.
 
+- **Phiên riêng trên máy laptop này (song song với phiên debug asset=7 ở
+  trên)** — Plan Mode: người dùng yêu cầu khảo sát SAS 6.02 để "phát hiện lỗi
+  cài đặt trên máy + tạo giao diện sửa/tắt/bật". 2 Explore agent đọc toàn bộ
+  `SAS 6.02.pdf` (119 Long Poll, Appendix B) + rà codebase hiện có, 1 Plan
+  agent tổng hợp thành v1 scope thu hẹp — xem chi tiết đầy đủ ở mục
+  **"Machine Diagnostics (2026-09-17)"** trong `CLAUDE.md`.
+  - Implement: 3 Long Poll mới (0xA0/0xA4/0x0E, byte layout tự tay đọc lại
+    từ PDF bằng `pypdf` — không dùng lại nguyên văn từ agent, đúng yêu cầu
+    "verify trước khi code" trong plan), bookkeeping `bill_config_ok` cho LP
+    0x08, đo timing chu kỳ poll (`last_cycle_overrun_ms`) theo đúng phát hiện
+    48ms trên MC07 nêu ở phiên trước. 11 unit test mới (`test_sas_commands`),
+    tất cả pass. Cập nhật cả 3 tool test (`fake_sas_machine.py`,
+    `Reader/sas_command_reader.py`, `sim_esp32.py`) để verify được toàn bộ mà
+    không cần phần cứng thật.
+  - **Bonus fix ngoài kế hoạch**: build firmware fail hoàn toàn trên máy này
+    với `FileNotFoundError: ... 'F:\\'` — hoá ra commit `afd2d23` (từ máy
+    `tech4`) đã lỡ commit `core_dir = F:/pio` vào `firmware/platformio.ini`
+    dùng chung, phá build mọi máy không có ổ F:. Gỡ dòng đó, thêm comment giải
+    thích core_dir phải set qua biến môi trường `PLATFORMIO_CORE_DIR` cục bộ
+    từng máy, không commit vào file chung.
+  - **Đổi kiến trúc UI giữa chừng theo yêu cầu người dùng**: ban đầu làm tab
+    "Diagnostics" ngay trong `control-panel` (App.tsx) — bị coi là "chen
+    ngang" vào công cụ chạy tournament (không có Error Boundary, bug ở tab
+    mới có thể sập cả UI Start/Stop). **Tách hẳn thành app Vite/React độc lập
+    mới `frontend/diagnostics` (port :5175)** — project riêng hoàn toàn
+    (`package.json`/`vite.config.ts` riêng), chỉ gọi chung REST API backend,
+    không import gì từ `control-panel`. Gỡ sạch code cũ khỏi App.tsx/api.ts
+    của control-panel (verify bundle size giảm về đúng mức trước khi thêm).
+    Định hướng người dùng nêu: sau này phát triển thành thiết bị cầm tay
+    portable để kiểm tra nhanh — layout đã làm dạng card dọc, nút to, touch-
+    friendly sẵn cho hướng đó.
+  - Verify end-to-end: khởi động lại Docker+backend+`sim_esp32.py` (đã
+    catch-up thêm ENABLE_BV/DISABLE_BV/ENABLE_PRINTER/DISABLE_PRINTER/
+    REFRESH_DIAGNOSTICS trước đó còn thiếu), xác nhận qua `curl` thật:
+    `enabled_features=82048` khớp đúng bitmask giả lập, `cash_out_limit_cents
+    =500000`, dev server `:5175` serve trang + proxy `/api` hoạt động đúng.
+    **Chưa xác nhận bằng mắt qua trình duyệt thật** — môi trường Claude Code
+    này không có công cụ chụp màn hình/browser automation.
+
+  - **Đổi thiết kế lần 2 ngay sau đó, theo làm rõ ý đồ thật của người dùng**:
+    "chỉ đọc hết tất cả thông số của 1 máy một lần... hiển thị theo kiểu
+    khoa học, cho người kỹ thuật nhìn thấy rõ" — không phải dashboard nhiều
+    máy như bản vừa làm. Redesign `frontend/diagnostics` từ card-grid nhiều
+    máy sang **1 dropdown chọn máy + 1 bảng thông số kỹ thuật đầy đủ** chia
+    nhóm (Identity/Denomination/Live State/Guards/Enabled-Features).
+  - Vì muốn "tất cả thông số", phát hiện firmware đã tự query từ trước
+    (LP 0x54 serial/version, LP 0x1F denom, LP 0x73 asset number/AFT
+    registered) nhưng **chưa từng gửi lên MQTT** — chỉ dùng nội bộ. Bổ sung
+    6 field này vào `MachineEvent`/telemetry/`MachineEntity`, cộng thêm
+    `bv_enabled`/`printer_enabled` (trước chỉ broadcast WebSocket, không có
+    trong DB) vì app mới cố tình không dùng socket.io. Tăng buffer JSON
+    telemetry `mqtt_client.cpp` 384→512, `PubSubClient.setBufferSize`
+    512→768 cho đủ chỗ.
+  - Giải mã **toàn bộ 13 bit** của LP 0xA0 (không chỉ mỗi AFT như bản đầu)
+    + validation style + meter model — đúng yêu cầu "kiểu khoa học".
+  - **Tự bắt lỗi trước khi commit**: nhiều comment code mới ghi nhầm ngày
+    "2026-09-18" (thật ra vẫn là 17/09) — kiểm tra lại bằng lệnh `date`,
+    sửa hàng loạt bằng `sed` trên cả 5 file trước khi build lần cuối.
+  - **Phát hiện phụ về hạ tầng dev session**: `TaskStop` trên background
+    task không kill hết được tiến trình `node`/`vite` con trên Windows —
+    3 lần khởi động lại dev server liên tiếp để lại 3 process treo chiếm
+    port 5175/5176/5177. Phải tự tìm PID qua `Get-NetTCPConnection` rồi
+    `Stop-Process -Force` thủ công mới dọn sạch được, restart mới bind
+    đúng lại port 5175. Bài học: sau khi `TaskStop` một dev-server task
+    trên Windows, nên tự kiểm tra lại port có thật sự trống chưa trước khi
+    khởi động lại, đừng tin lệnh stop đã thành công là đủ.
+  - Rebuild + type-check lại toàn bộ (firmware/backend) sau khi sửa ngày —
+    pass sạch, không có gì bị ảnh hưởng bởi thao tác `sed`.
+
 ---

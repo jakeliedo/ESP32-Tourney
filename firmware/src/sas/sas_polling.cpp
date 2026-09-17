@@ -157,6 +157,17 @@ static bool     s_denom_known           = false;
 static uint8_t  s_denom_code            = 0;
 static uint32_t s_denom_value_x10000    = 0;
 
+// Machine-diagnostics state (LP 0xA0/0xA4/0x0E + LP 0x08 bookkeeping),
+// added 2026-09-17 -- see sas_polling.h's getters for the "*_known()
+// returns false until first success" contract these follow.
+static bool     s_features_known         = false;
+static uint32_t s_enabled_features       = 0;
+static bool     s_cash_out_limit_known   = false;
+static uint32_t s_cash_out_limit_cents   = 0;
+static bool     s_rte_guard_ok           = false;
+static bool     s_bill_config_ok         = false;
+static uint16_t s_last_cycle_overrun_ms  = 0;  // worst overrun since last report_event(); reset to 0 after each report
+
 // ── Internal UART helpers ──────────────────────────────────────
 
 /**
@@ -365,6 +376,22 @@ static void report_event(uint8_t exc, uint32_t credits,
     ev.aft_status     = aft_status;
     ev.bv_enabled     = s_bv_enabled;
     ev.printer_enabled = s_printer_enabled;
+    ev.enabled_features     = s_enabled_features;
+    ev.cash_out_limit_cents = s_cash_out_limit_cents;
+    ev.rte_guard_ok         = s_rte_guard_ok;
+    ev.bill_config_ok       = s_bill_config_ok;
+    ev.last_cycle_overrun_ms = s_last_cycle_overrun_ms;
+    s_last_cycle_overrun_ms = 0;  // report-and-clear, like a hardware sticky-bit
+    // Identity/config (2026-09-17) -- already computed once at boot, just
+    // forwarded here so the single-machine diagnostics view can show them.
+    strncpy(ev.serial_number, s_serial_number, sizeof(ev.serial_number) - 1);
+    ev.serial_number[sizeof(ev.serial_number) - 1] = '\0';
+    strncpy(ev.sas_version, s_sas_version, sizeof(ev.sas_version) - 1);
+    ev.sas_version[sizeof(ev.sas_version) - 1] = '\0';
+    ev.denom_code          = s_denom_code;
+    ev.denom_value_x10000  = s_denom_value_x10000;
+    ev.asset_number        = s_aft_asset_number;
+    ev.aft_registered      = s_aft_registered;
     if (txn_id) strncpy(ev.txn_id, txn_id, 20);
     else        ev.txn_id[0] = '\0';
 
@@ -790,6 +817,94 @@ static uint32_t credits_to_cents(uint32_t raw_credits) {
     return (uint32_t)(((uint64_t)raw_credits * s_denom_value_x10000) / 100);
 }
 
+// ── Machine diagnostics (LP 0xA0/0xA4/0x0E) ───────────────────────
+// Added 2026-09-17. Mirrors query_machine_denom()'s query-once(-ish)
+// pattern exactly -- see sas_polling.h for the *_known() "not yet queried"
+// contract these three feed.
+
+static bool query_enabled_features() {
+    uint8_t frame[6];
+    uint8_t resp[16];
+
+    size_t frame_len = sas_build_lp_enabled_features(frame, g_machine_id);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+
+    if (n == 0) {
+        ESP_LOGW(TAG, "Enabled features (LP 0xA0): no response from machine");
+        return false;
+    }
+
+    SasEnabledFeaturesResponse info = sas_parse_enabled_features(resp, n);
+    if (!info.valid) {
+        ESP_LOGW(TAG, "Enabled features (LP 0xA0): response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+
+    s_enabled_features = info.feature_bits;
+    s_features_known   = true;
+    ESP_LOGI(TAG, "Enabled features: 0x%06lX (AFT=%d, ticket-redemption=%d, 40ms-poll-rate=%d)",
+             (unsigned long)s_enabled_features,
+             (s_enabled_features & SAS_FEATURE_AFT_SUPPORTED)      ? 1 : 0,
+             (s_enabled_features & SAS_FEATURE_TICKET_REDEMPTION)  ? 1 : 0,
+             (s_enabled_features & SAS_FEATURE_MAX_POLL_RATE_40MS) ? 1 : 0);
+    return true;
+}
+
+static bool query_cash_out_limit() {
+    uint8_t frame[6];
+    uint8_t resp[16];
+
+    size_t frame_len = sas_build_lp_cash_out_limit(frame, g_machine_id);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+
+    if (n == 0) {
+        ESP_LOGW(TAG, "Cash out limit (LP 0xA4): no response from machine");
+        return false;
+    }
+
+    SasCashOutLimitResponse info = sas_parse_cash_out_limit(resp, n);
+    if (!info.valid) {
+        ESP_LOGW(TAG, "Cash out limit (LP 0xA4): response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+
+    s_cash_out_limit_cents = credits_to_cents(info.cash_out_limit_raw);
+    s_cash_out_limit_known = true;
+    ESP_LOGI(TAG, "Cash out limit: %lu.%02lu credits (raw=%lu)",
+             (unsigned long)(s_cash_out_limit_cents / 100),
+             (unsigned long)(s_cash_out_limit_cents % 100),
+             (unsigned long)info.cash_out_limit_raw);
+    return true;
+}
+
+/**
+ * Force Real Time Event Reporting OFF (LP 0x0E, enable=false). This
+ * project's whole polling model (General Poll + Type-R/M/S long polls,
+ * see sas_general_poll()/sas_receive() above) assumes classic single-byte
+ * exception reporting -- RTE mode replaces that with an entirely
+ * different event-message format (Section 12.5) that nothing in this
+ * codebase parses. Persistent machine-side config write, same as
+ * set_ticket_printing() -- does not automatically revert on power loss, so this is
+ * re-asserted at boot + periodically, same reasoning as ticket lockdown.
+ */
+static bool enforce_rte_reporting_off() {
+    uint8_t frame[5];
+    uint8_t resp[1];
+    size_t frame_len = sas_build_lp_rte_reporting(frame, g_machine_id, false);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, 1, SAS_LONG_POLL_TIMEOUT);
+    bool acked = (n == 1 && resp[0] == g_machine_id);
+    s_rte_guard_ok = acked;
+    if (acked) {
+        ESP_LOGI(TAG, "RTE reporting: confirmed OFF (LP 0x0E)");
+    } else {
+        ESP_LOGW(TAG, "RTE reporting OFF (LP 0x0E): no ACK (n=%d)", (int)n);
+    }
+    return acked;
+}
+
 // ── Asset Number query (LP 0x73, read-only) ──────────────────────
 
 /**
@@ -1091,6 +1206,17 @@ void sas_polling_task(void* pvParameters) {
     for (int attempt = 0; attempt < 3; attempt++) {
         if (set_ticket_printing(false)) break;
     }
+    // Machine diagnostics (LP 0xA0/0xA4/0x0E) -- added 2026-09-17, same
+    // "query/enforce once at boot, a few retries" idiom as everything above.
+    for (int attempt = 0; attempt < 3 && !s_features_known; attempt++) {
+        query_enabled_features();
+    }
+    for (int attempt = 0; attempt < 3 && !s_cash_out_limit_known; attempt++) {
+        query_cash_out_limit();
+    }
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (enforce_rte_reporting_off()) break;
+    }
 
     // Check for pending transaction from previous power cycle
     recover_pending_aft();
@@ -1151,7 +1277,7 @@ void sas_polling_task(void* pvParameters) {
                     vTaskDelay(pdMS_TO_TICKS(40));
                     if (execute_simple_command(SAS_CMD_ENABLE_BILL)) {
                         s_bv_enabled = true;
-                        configure_bill_persistent_enable();
+                        s_bill_config_ok = configure_bill_persistent_enable();
                     }
                     s_state = SLOT_STATE_IDLE;
                     ESP_LOGI(TAG, "ENABLE: LP 0x02 + LP 0x06 sent");
@@ -1159,7 +1285,7 @@ void sas_polling_task(void* pvParameters) {
                 case CMD_ENABLE_BV:
                     if (execute_simple_command(SAS_CMD_ENABLE_BILL)) {
                         s_bv_enabled = true;
-                        configure_bill_persistent_enable();
+                        s_bill_config_ok = configure_bill_persistent_enable();
                     }
                     ESP_LOGI(TAG, "ENABLE_BV: LP 0x06 sent (acked=%d)", s_bv_enabled);
                     break;
@@ -1176,6 +1302,18 @@ void sas_polling_task(void* pvParameters) {
                     for (int attempt = 0; attempt < 3; attempt++) {
                         if (set_ticket_printing(false)) { s_printer_enabled = false; break; }
                     }
+                    break;
+                case CMD_REFRESH_DIAGNOSTICS:
+                    // Operator-triggered re-query, no reboot needed -- an
+                    // operator may have changed machine config via the
+                    // audit menu mid-session. Re-run all three immediately
+                    // and report right away rather than waiting for the
+                    // next slow periodic tick (see diagnostics_tick below).
+                    query_enabled_features();
+                    query_cash_out_limit();
+                    enforce_rte_reporting_off();
+                    report_event(last_reported_exception, last_credits, 0, 0, 0, NULL);
+                    ESP_LOGI(TAG, "REFRESH_DIAGNOSTICS: re-queried LP 0xA0/0xA4, re-asserted LP 0x0E off");
                     break;
                 default:
                     ESP_LOGW(TAG, "Unknown command type: %d", cmd.cmd_type);
@@ -1463,7 +1601,39 @@ void sas_polling_task(void* pvParameters) {
             recover_pending_aft();
         }
 
+        // ── 4c. Periodic diagnostics re-check (2026-09-17) ───────
+        // Same "cable/config may change mid-session" rationale as
+        // asset_number_tick above, extended to: an operator may change
+        // machine config via the audit menu, or the SAS cable may get
+        // reconnected after boot. ~5 min cadence (7500 cycles @ 40ms) --
+        // deliberately much slower than Credits/Meters/asset-number, since
+        // these are config facts that rarely change and each query risks
+        // landing in the same 40ms tick as the General Poll (see the
+        // 2026-09-17 poll-cycle-overrun investigation in NHATKY.md).
+        static uint16_t diagnostics_tick = 0;
+        if (++diagnostics_tick >= 7500) {
+            diagnostics_tick = 0;
+            query_enabled_features();
+            query_cash_out_limit();
+            enforce_rte_reporting_off();
+        }
+
         // ── 5. Strict 40ms cycle boundary ───────────────────────
+        // Poll-cycle timing diagnostic (2026-09-17): measure how long this
+        // iteration actually took before the delay -- a real machine was
+        // observed overrunning the nominal SAS_POLL_INTERVAL_MS budget
+        // (e.g. 48ms), most likely whenever one of the background long
+        // polls above (Credits/Meters/AFT/diagnostics) lands in the same
+        // tick as the General Poll. vTaskDelayUntil itself self-corrects
+        // (a slow cycle doesn't compound into permanent drift), so this is
+        // purely observability, not a fix -- report_event() surfaces it to
+        // the backend so a degraded machine/cable shows up before it
+        // starts causing missed polls.
+        TickType_t cycle_end = xTaskGetTickCount();
+        uint32_t cycle_ms = (uint32_t)((cycle_end - last_wake) * portTICK_PERIOD_MS);
+        if (cycle_ms > SAS_POLL_INTERVAL_MS && cycle_ms > s_last_cycle_overrun_ms) {
+            s_last_cycle_overrun_ms = (uint16_t)cycle_ms;
+        }
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAS_POLL_INTERVAL_MS));
     }
 }
@@ -1505,6 +1675,30 @@ uint8_t sas_get_denom_code() {
 
 uint32_t sas_get_denom_value_x10000() {
     return s_denom_value_x10000;
+}
+
+bool sas_features_known() {
+    return s_features_known;
+}
+
+uint32_t sas_get_enabled_features() {
+    return s_enabled_features;
+}
+
+bool sas_cash_out_limit_known() {
+    return s_cash_out_limit_known;
+}
+
+uint32_t sas_get_cash_out_limit_cents() {
+    return s_cash_out_limit_cents;
+}
+
+bool sas_rte_guard_ok() {
+    return s_rte_guard_ok;
+}
+
+bool sas_bill_config_ok() {
+    return s_bill_config_ok;
 }
 
 const char* sas_get_sas_version() {

@@ -40,6 +40,26 @@
 #define SAS_CMD_SEND_MACHINE_INFO   0x1F  // Long Poll 1F: Send Gaming Machine ID and Information (denom, max bet, paytable...)
 #define SAS_CMD_EXT_VALIDATION_STATUS 0x7B  // Long Poll 7B: Extended Validation Status (printer/ticket cashout control)
 
+// Added 2026-09-17 for the machine-diagnostics feature (detect config
+// drift on connected machines, surface it as a fix/toggle UI). Byte
+// layouts below verified directly against SAS 6.02.pdf (Section 7.14/
+// 7.16/12.1), not from memory/third-party libraries -- see sas_commands.cpp
+// for the exact table citations.
+#define SAS_CMD_ENABLED_FEATURES    0xA0  // Long Poll A0: Send Enabled Features (Section 7.14, Table 7.14a/b) -- Type M
+#define SAS_CMD_CASH_OUT_LIMIT      0xA4  // Long Poll A4: Send Cash Out Limit (Section 7.16, Table 7.16a/b) -- Type M
+#define SAS_CMD_RTE_REPORTING       0x0E  // Long Poll 0E: Enable/Disable Real Time Event Reporting (Section 12.1, Table 12.1) -- Type S
+
+// ── Enabled Features bits (Tables 7.14c/d/e) ─────────────────
+// Combined into one 24-bit value by sas_parse_enabled_features() as
+// (features1) | (features2 << 8) | (features3 << 16), so a bit's combined
+// position = its table bit number + 0/8/16 depending which byte it's in.
+// Only the bits this project actually checks are named below; every other
+// defined bit is documented in the big comment block in sas_commands.cpp
+// next to the parser, not duplicated here.
+#define SAS_FEATURE_TICKET_REDEMPTION   (1UL << 7)   // Features1 bit7: 0=disabled/not supported, 1=enabled
+#define SAS_FEATURE_AFT_SUPPORTED       (1UL << 14)  // Features2 bit6 (combined bit 8+6): 0=not supported, 1=supported -- the one this project's AFT-only cash flow actually depends on
+#define SAS_FEATURE_MAX_POLL_RATE_40MS  (1UL << 16)  // Features3 bit0 (combined bit 16+0): 1 = machine guarantees it supports a 40ms poll rate (SAS 6.01+ machines must set this if they support it -- older machines may support it without setting the bit)
+
 // ── Extended Validation Status control/status bits (Table 15.2c) ────
 // Sent as a 16-bit field: byte0 = LSB (bits 0-7 below), byte1 = MSB (only
 // bit 7 of MSB, i.e. overall bit 15, is defined -- "cancel validation
@@ -315,6 +335,23 @@ typedef struct {
     bool     valid;
 } SasMachineInfoResponse;
 
+// Added 2026-09-17 (machine-diagnostics feature). See SAS_FEATURE_* above
+// for the bits this project checks; feature_bits is the full 24-bit
+// combined value (features1 | features2<<8 | features3<<16) in case a
+// caller needs a bit not yet named.
+typedef struct {
+    uint32_t feature_bits;
+    bool     valid;
+} SasEnabledFeaturesResponse;
+
+// cash_out_limit_raw is in SAS accounting-denom units (Table 7.16b), same
+// as SasCreditResponse.credits -- convert via credits_to_cents()-style
+// logic at the call site, do NOT assume it's already cents.
+typedef struct {
+    uint32_t cash_out_limit_raw;
+    bool     valid;
+} SasCashOutLimitResponse;
+
 // ─────────────────────────────────────────────────────────────
 // Frame builder functions – write into caller-provided buffer
 // Caller must ensure buffer is large enough (max 32 bytes)
@@ -511,6 +548,46 @@ size_t sas_build_lp_version_serial(uint8_t* buf, uint8_t address);
  */
 size_t sas_build_lp_machine_info(uint8_t* buf, uint8_t address);
 
+/**
+ * Build Long Poll A0 – Send Enabled Features (Table 7.14a).
+ * Request: [addr][0xA0][game_number:2 BCD][CRC_L][CRC_H].
+ * game_number is always sent as 0000 ("the gaming machine") -- this
+ * project treats every connected machine as single-game, per-game
+ * feature queries (Table 7.14a allows a specific game number) are out of
+ * scope.
+ * @param buf     Output buffer (min 6 bytes)
+ * @param address SAS machine address
+ * @return frame length (always 6)
+ */
+size_t sas_build_lp_enabled_features(uint8_t* buf, uint8_t address);
+
+/**
+ * Build Long Poll A4 – Send Cash Out Limit (Table 7.16a).
+ * Request: [addr][0xA4][game_number:2 BCD=0000][CRC_L][CRC_H].
+ * @param buf     Output buffer (min 6 bytes)
+ * @param address SAS machine address
+ * @return frame length (always 6)
+ */
+size_t sas_build_lp_cash_out_limit(uint8_t* buf, uint8_t address);
+
+/**
+ * Build Long Poll 0E – Enable/Disable Real Time Event Reporting (Table 12.1).
+ * Request: [addr][0x0E][enable_disable:1 = 0x00/0x01][CRC_L][CRC_H].
+ * This project's whole polling model (sas_polling.cpp) assumes classic
+ * General-Poll exception reporting -- RTE mode changes the response
+ * format entirely (Section 12.5) and would break parsing throughout this
+ * codebase. Only ever call this with enable=false (see
+ * enforce_rte_reporting_off() in sas_polling.cpp); there is no legitimate
+ * reason to enable it here.
+ * Response is a bare Type-S ACK/NACK, same shape as sas_build_lp_simple's
+ * commands -- no dedicated parser, check resp[0]==address like those do.
+ * @param buf     Output buffer (min 5 bytes)
+ * @param address SAS machine address
+ * @param enable  false to disable (the only mode this project ever uses)
+ * @return frame length (always 5)
+ */
+size_t sas_build_lp_rte_reporting(uint8_t* buf, uint8_t address, bool enable);
+
 // ─────────────────────────────────────────────────────────────
 // Response parser functions
 // ─────────────────────────────────────────────────────────────
@@ -525,6 +602,8 @@ SasAftLockStatusResponse sas_parse_aft_lock_status(const uint8_t* buf, size_t le
 SasValidationStatusResponse sas_parse_validation_status(const uint8_t* buf, size_t len);
 SasVersionSerialResponse sas_parse_version_serial(const uint8_t* buf, size_t len);
 SasMachineInfoResponse  sas_parse_machine_info(const uint8_t* buf, size_t len);
+SasEnabledFeaturesResponse sas_parse_enabled_features(const uint8_t* buf, size_t len);
+SasCashOutLimitResponse sas_parse_cash_out_limit(const uint8_t* buf, size_t len);
 
 /**
  * Convert a Table C-4 denomination code into a value in ten-thousandths

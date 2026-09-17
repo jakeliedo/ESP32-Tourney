@@ -168,6 +168,25 @@ class FakeSasMachine:
         payload = bytes([addr, 0x72, 0x00]) + amount
         self._send(addr, append_crc(payload)[2:])
 
+    # Added 2026-09-17 for the machine-diagnostics feature (LP 0xA0/0xA4).
+    # Table 7.14b: [addr][0xA0][game#:2][features1][features2][features3]
+    # [reserved:3][CRC:2]. Canned: ticket redemption + AFT support + 40ms
+    # poll rate all "on", matching what this project's firmware expects to
+    # find on a well-configured machine.
+    def respond_enabled_features(self, addr: int):
+        payload = (
+            bytes([addr, 0xA0, 0x00, 0x00])
+            + bytes([0x80, 0x40, 0x01])  # features1/2/3
+            + bytes([0x00, 0x00, 0x00])  # reserved
+        )
+        self._send(addr, append_crc(payload)[2:])
+
+    # Table 7.16b: [addr][0xA4][game#:2][cash_out_limit:2 BCD MSB-first][CRC:2].
+    # Canned: 5000 (accounting-denom units).
+    def respond_cash_out_limit(self, addr: int):
+        payload = bytes([addr, 0xA4, 0x00, 0x00]) + bcd_encode(5000, 2)
+        self._send(addr, append_crc(payload)[2:])
+
     def run(self):
         print(f"[fake_sas_machine] listening on {self.ser.port} @ {BAUD} baud, address=0x{self.address:02X}")
         while True:
@@ -184,7 +203,7 @@ class FakeSasMachine:
             if addr != self.address:
                 continue
             print(f"[fake_sas_machine] long poll cmd=0x{cmd:02X} raw={frame['raw'].hex()}")
-            if cmd in (0x01, 0x02, 0x06, 0x07):
+            if cmd in (0x01, 0x02, 0x06, 0x07, 0x0E):
                 self.respond_ack(addr)
             elif cmd == 0x1A:
                 self.respond_credits(addr)
@@ -192,6 +211,10 @@ class FakeSasMachine:
                 self.respond_meters(addr)
             elif cmd == 0x72:
                 self.respond_aft(addr, frame["raw"])
+            elif cmd == 0xA0:
+                self.respond_enabled_features(addr)
+            elif cmd == 0xA4:
+                self.respond_cash_out_limit(addr)
             else:
                 print(f"[fake_sas_machine] unhandled cmd 0x{cmd:02X}, ignoring")
 

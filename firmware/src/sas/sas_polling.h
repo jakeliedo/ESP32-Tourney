@@ -37,6 +37,28 @@ typedef struct {
     uint8_t  aft_status;     // Set when reporting AFT result
     bool     bv_enabled;     // Bill validator state, ack'd by the machine (LP 0x06/0x07)
     bool     printer_enabled; // Ticket cashout/redemption lockdown state (LP 0x7B)
+    // Added 2026-09-17 (machine-diagnostics feature) -- see
+    // sas_features_known() etc. below for the "not yet queried" semantics
+    // these values follow (0/false doesn't mean "confirmed off", it can
+    // mean "not yet known" -- the backend should treat these as
+    // best-effort snapshot, not a guarantee, until the *_known() getter
+    // has gone true at least once).
+    uint32_t enabled_features;      // SAS_FEATURE_* bitmask (LP 0xA0), 0 if not yet known
+    uint32_t cash_out_limit_cents;  // LP 0xA4, converted to cents, 0 if not yet known
+    bool     rte_guard_ok;          // Last LP 0x0E disable-RTE attempt ACK'd?
+    bool     bill_config_ok;        // Last LP 0x08 persistent-enable write ACK'd?
+    uint16_t last_cycle_overrun_ms; // 0 = no overrun since last report; >0 = worst overrun since last report
+    // Machine identity/config (2026-09-17) -- already queried once at boot
+    // by query_machine_identity()/query_machine_denom()/AFT registration
+    // for internal use, just not previously forwarded off-board. Added for
+    // the single-machine "read everything at once" technical view
+    // (frontend/diagnostics) -- see that app's CLAUDE.md-documented layout.
+    char     serial_number[41];  // LP 0x54, ASCII, empty until sas_identity_known()
+    char     sas_version[4];     // LP 0x54, e.g. "602", empty until known
+    uint8_t  denom_code;          // LP 0x1F, Table C-4 code, 0 until sas_denom_known()
+    uint32_t denom_value_x10000;  // LP 0x1F, dollars*10000, 0 until known
+    uint32_t asset_number;        // LP 0x73 (query or registration), 0 until known
+    bool     aft_registered;      // Has a successful 2-step AFT registration completed?
 } MachineEvent;
 
 // ── Server command types ──────────────────────────────────────
@@ -50,6 +72,7 @@ typedef struct {
 #define CMD_DISABLE_BV   7   // Bill validator only: LP 0x07 (no Shutdown/Startup)
 #define CMD_ENABLE_PRINTER  8  // Re-allow ticket cashout/redemption: LP 0x7B
 #define CMD_DISABLE_PRINTER 9  // Lock down ticket cashout/redemption: LP 0x7B
+#define CMD_REFRESH_DIAGNOSTICS 10  // Operator-triggered re-query of LP 0xA0/0xA4 + re-assert LP 0x0E off, without a reboot
 
 // ── Shared queues (created in main.cpp, used by both tasks) ──
 extern QueueHandle_t g_command_queue;  // Server → SAS Task
@@ -97,3 +120,18 @@ const char* sas_get_sas_version();
 bool     sas_denom_known();
 uint8_t  sas_get_denom_code();
 uint32_t sas_get_denom_value_x10000();
+
+/**
+ * Machine-diagnostics getters (LP 0xA0/0xA4/0x0E + LP 0x08 bookkeeping),
+ * added 2026-09-17. Queried once at boot (3 retries) and re-checked every
+ * ~5 minutes (an operator may change machine config via the audit menu
+ * mid-session), plus on-demand via CMD_REFRESH_DIAGNOSTICS. The *_known()
+ * getters return false until the first successful query -- callers must
+ * not treat the paired value's default (0/false) as a confirmed reading.
+ */
+bool     sas_features_known();
+uint32_t sas_get_enabled_features();
+bool     sas_cash_out_limit_known();
+uint32_t sas_get_cash_out_limit_cents();
+bool     sas_rte_guard_ok();    // last LP 0x0E disable-RTE attempt ACK'd? (false until first attempt)
+bool     sas_bill_config_ok();  // last LP 0x08 persistent-enable write ACK'd? (false until first attempt)

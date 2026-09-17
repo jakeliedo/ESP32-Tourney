@@ -417,6 +417,101 @@ SasMachineInfoResponse sas_parse_machine_info(const uint8_t* buf, size_t len) {
     return resp;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Long Poll A0 – Send Enabled Features (Section 7.14, verified 2026-09-17
+// directly against SAS 6.02.pdf, not from memory)
+//
+// Request  (Table 7.14a): [addr][0xA0][game_number:2 BCD=0000][CRC_L][CRC_H] -- 6 bytes
+// Response (Table 7.14b): [addr][0xA0][game_number:2 BCD][features1][features2]
+//                         [features3][reserved:3][CRC_L][CRC_H] -- 12 bytes, FIXED length
+//                         (no length byte in this frame, unlike LP 0x54/0x1F)
+// Features1/2/3 bit tables: 7.14c/d/e -- see SAS_FEATURE_* in sas_commands.h
+// for the bits this project actually checks (AFT support, ticket
+// redemption, 40ms poll-rate guarantee). Full tables for reference:
+//   Features1 (Table 7.14c): bit0 jackpot multiplier, bit1 AFT bonus
+//     awards, bit2 legacy bonus awards, bit3 tournament, bit4 validation
+//     extensions, bits5-6 validation style (00 standard/none, 01 system,
+//     10 secure enhanced), bit7 ticket redemption.
+//   Features2 (Table 7.14d): bits0-1 meter model flag, bit2 tickets
+//     counted in total drop/cancelled credits, bit3 extended meters,
+//     bit4 Component Authentication, bit5 reserved, bit6 Advanced Funds
+//     Transfer (AFT), bit7 multi-denom extensions.
+//   Features3 (Table 7.14e): bit0 max 40ms polling rate guaranteed,
+//     bit1 multiple SAS progressive win reporting (LP 87), bits2-7 reserved.
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_enabled_features(uint8_t* buf, uint8_t address) {
+    buf[0] = address;
+    buf[1] = SAS_CMD_ENABLED_FEATURES;
+    buf[2] = 0x00;  // game number BCD, MSB -- 0000 = the gaming machine
+    buf[3] = 0x00;  // game number BCD, LSB
+    crc16_append(buf, 4);
+    return 6;
+}
+
+SasEnabledFeaturesResponse sas_parse_enabled_features(const uint8_t* buf, size_t len) {
+    SasEnabledFeaturesResponse resp = {0, false};
+    if (len < 12) return resp;
+    if (!crc16_verify(buf, len)) return resp;
+    if (buf[1] != SAS_CMD_ENABLED_FEATURES) return resp;
+
+    resp.feature_bits = (uint32_t)buf[4]
+                       | ((uint32_t)buf[5] << 8)
+                       | ((uint32_t)buf[6] << 16);
+    resp.valid = true;
+    return resp;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Long Poll A4 – Send Cash Out Limit (Section 7.16, verified 2026-09-17
+// directly against SAS 6.02.pdf)
+//
+// Request  (Table 7.16a): [addr][0xA4][game_number:2 BCD=0000][CRC_L][CRC_H] -- 6 bytes
+// Response (Table 7.16b): [addr][0xA4][game_number:2 BCD][cash_out_limit:2 BCD,
+//                         MSB first][CRC_L][CRC_H] -- 8 bytes, FIXED length,
+//                         no length byte. cash_out_limit is in SAS
+//                         accounting-denom units (same convention as
+//                         Credits LP 0x1A) -- NOT already cents.
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_cash_out_limit(uint8_t* buf, uint8_t address) {
+    buf[0] = address;
+    buf[1] = SAS_CMD_CASH_OUT_LIMIT;
+    buf[2] = 0x00;  // game number BCD, MSB -- 0000 = the gaming machine
+    buf[3] = 0x00;  // game number BCD, LSB
+    crc16_append(buf, 4);
+    return 6;
+}
+
+SasCashOutLimitResponse sas_parse_cash_out_limit(const uint8_t* buf, size_t len) {
+    SasCashOutLimitResponse resp = {0, false};
+    if (len < 8) return resp;
+    if (!crc16_verify(buf, len)) return resp;
+    if (buf[1] != SAS_CMD_CASH_OUT_LIMIT) return resp;
+
+    resp.cash_out_limit_raw = bcd_to_uint32(&buf[4], 2);
+    resp.valid = true;
+    return resp;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Long Poll 0E – Enable/Disable Real Time Event Reporting (Section 12.1,
+// verified 2026-09-17 directly against SAS 6.02.pdf, Table 12.1)
+//
+// Request: [addr][0x0E][enable_disable:1=0x00/0x01][CRC_L][CRC_H] -- 5 bytes,
+// no length byte. Response is a bare Type-S ACK/NACK (Table 7.4b), same
+// shape as sas_build_lp_simple's commands -- no dedicated parser exists,
+// callers check resp[0]==address the same way execute_simple_command() does.
+// ─────────────────────────────────────────────────────────────
+
+size_t sas_build_lp_rte_reporting(uint8_t* buf, uint8_t address, bool enable) {
+    buf[0] = address;
+    buf[1] = SAS_CMD_RTE_REPORTING;
+    buf[2] = enable ? 0x01 : 0x00;
+    crc16_append(buf, 3);
+    return 5;
+}
+
 // Table C-4, Appendix C (verified 2026-09-08 directly against the official
 // SAS 6.02 spec PDF). Values are dollars * 10000 so the fractional-cent
 // codes (0x1B-0x1F) stay exact integers instead of needing floating point.

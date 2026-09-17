@@ -1,0 +1,50 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Same palette as control-panel (kept in sync manually -- this app is
+   deliberately a separate project, not a shared package, so there's no
+   single source of truth to import from). */
+:root {
+  --bg:           #07080d;
+  --surface:      #0e1018;
+  --surface-2:    #131520;
+  --surface-3:    #191c28;
+  --gold:         #c8a84b;
+  --gold-dim:     #6e5a26;
+  --text:         #ddd8c8;
+  --text-2:       #7a7060;
+  --text-3:       #3a3628;
+  --border:       #1c1f2e;
+  --border-2:     #242840;
+  --online:       #2d9e5f;
+  --handpay:      #b03030;
+  --disabled:     #b87030;
+}
+
+html, body, #root {
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Consolas', 'Menlo', 'Courier New', monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 2px; }
+
+/* Larger default touch target than control-panel's buttons -- this app is
+   meant to eventually run on a small handheld/portable device, not just a
+   mouse-driven desktop browser. */
+button {
+  cursor: pointer; border: 1px solid var(--border-2);
+  border-radius: 4px; padding: 10px 16px;
+  font-family: inherit; font-size: 13px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
+  background: var(--surface-3); color: var(--text-2);
+  transition: opacity .12s, background .12s;
+}
+button:hover  { opacity: .85; }
+button:active { opacity: .65; }
+button:disabled { opacity: .35; cursor: not-allowed; }
