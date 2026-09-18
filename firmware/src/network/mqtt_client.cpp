@@ -132,7 +132,12 @@ static void publish_identity_if_known() {
 // ── Report_Queue → JSON serialiser ────────────────────────────
 
 static void serialize_and_publish(const MachineEvent* ev) {
-    StaticJsonDocument<512> doc;
+    // 2026-09-18: bumped 512->640 (2 more fields: aft_transfer_limit_cents,
+    // door_open) -- see the resp_buf[32] Meters-poll lesson (2026-09-17,
+    // NHATKY.md) for why "add a couple fields, leave the buffer as-is" is
+    // exactly the kind of change that silently overflows a just-barely-
+    // fits buffer; keeping real headroom here on purpose.
+    StaticJsonDocument<640> doc;
     doc["machine_id"] = g_mqtt_client_id;
     doc["exception"]  = ev->exception_code;
     doc["credits"]    = ev->credits;
@@ -146,8 +151,10 @@ static void serialize_and_publish(const MachineEvent* ev) {
     // MachineEvent/getters for the "0/false may mean not-yet-known" caveat.
     doc["enabled_features"]      = ev->enabled_features;
     doc["cash_out_limit_cents"]  = ev->cash_out_limit_cents;
+    doc["aft_transfer_limit_cents"] = ev->aft_transfer_limit_cents;
     doc["rte_guard_ok"]          = ev->rte_guard_ok;
     doc["bill_config_ok"]        = ev->bill_config_ok;
+    doc["door_open"]             = ev->door_open;
     doc["last_cycle_overrun_ms"] = ev->last_cycle_overrun_ms;
     // Identity/config fields (2026-09-17) -- for the single-machine "read
     // everything" technical view (frontend/diagnostics). Empty string /
@@ -160,7 +167,7 @@ static void serialize_and_publish(const MachineEvent* ev) {
     doc["aft_registered"]     = ev->aft_registered;
     if (ev->txn_id[0] != '\0') doc["txn_id"] = ev->txn_id;
 
-    char buf[512];
+    char buf[640];
     serializeJson(doc, buf, sizeof(buf));
     s_mqtt.publish(g_topic_telemetry, buf);
     led_pulse_network();  // real outbound MQTT traffic -- see led_indicator.h
@@ -206,8 +213,9 @@ void mqtt_client_init() {
     // ~450-500 bytes (identity/config fields added for the single-machine
     // diagnostics view), and this buffer must also fit the MQTT fixed/
     // variable header + topic string on top of the JSON payload, not just
-    // the payload alone.
-    s_mqtt.setBufferSize(768);
+    // the payload alone. 2026-09-18: bumped again (768->896) alongside the
+    // JSON buffer bump above (2 more telemetry fields).
+    s_mqtt.setBufferSize(896);
 }
 
 void mqtt_task_start() {

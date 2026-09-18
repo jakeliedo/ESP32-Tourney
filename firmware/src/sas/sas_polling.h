@@ -44,9 +44,27 @@ typedef struct {
     // best-effort snapshot, not a guarantee, until the *_known() getter
     // has gone true at least once).
     uint32_t enabled_features;      // SAS_FEATURE_* bitmask (LP 0xA0), 0 if not yet known
-    uint32_t cash_out_limit_cents;  // LP 0xA4, converted to cents, 0 if not yet known
+    uint32_t cash_out_limit_cents;  // LP 0xA4, converted to cents, 0 if not yet known -- HOPPER coin-out limit only (Table 7.16a/b), NOT a ticket or AFT limit
+    // Added 2026-09-18: LP 0x74's "gaming machine transfer limit" (Table
+    // 8.2b) -- the actual queryable "will an AFT payout of this size get
+    // rejected and need a handpay instead" figure (rejection = status
+    // AFT_STATUS_OVER_LIMIT / 0x84). Distinct from cash_out_limit_cents
+    // above (hopper-only) and from a machine's jurisdictional handpay/
+    // jackpot win threshold (Section 14 of SAS 6.02), which the spec
+    // documents as attendant-configured on the cabinet with NO
+    // corresponding Long Poll to read it back -- not obtainable via SAS.
+    uint32_t aft_transfer_limit_cents; // LP 0x74, in cents, 0 if not yet known
     bool     rte_guard_ok;          // Last LP 0x0E disable-RTE attempt ACK'd?
     bool     bill_config_ok;        // Last LP 0x08 persistent-enable write ACK'd?
+    // Added 2026-09-18: persistent "is the slot door open right now" state
+    // (SAS_EXC_SLOT_DOOR_OPENED/CLOSED, 0x11/0x12), mirrored from the same
+    // flag that already freezes jackpot wager-inference while the door is
+    // open. Distinct from exception_code above, which only reflects the
+    // last-reported exception AT THE MOMENT of a report_event() call (most
+    // report_event() call sites hardcode SAS_EXC_NO_ACTIVITY regardless of
+    // door state) -- so exception_code alone cannot answer "is it open
+    // right now" once even one more telemetry event has gone out since.
+    bool     door_open;
     uint16_t last_cycle_overrun_ms; // 0 = no overrun since last report; >0 = worst overrun since last report
     // Machine identity/config (2026-09-17) -- already queried once at boot
     // by query_machine_identity()/query_machine_denom()/AFT registration
@@ -133,5 +151,7 @@ bool     sas_features_known();
 uint32_t sas_get_enabled_features();
 bool     sas_cash_out_limit_known();
 uint32_t sas_get_cash_out_limit_cents();
+bool     sas_aft_transfer_limit_known();   // LP 0x74 transfer-limit query succeeded at least once?
+uint32_t sas_get_aft_transfer_limit_cents();
 bool     sas_rte_guard_ok();    // last LP 0x0E disable-RTE attempt ACK'd? (false until first attempt)
 bool     sas_bill_config_ok();  // last LP 0x08 persistent-enable write ACK'd? (false until first attempt)

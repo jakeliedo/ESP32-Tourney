@@ -1,3 +1,10 @@
+/* Retro DOS/CRT-terminal look (2026-09-18, requested for the wide-screen
+   desktop deployment of this app) -- VT323 is a single-weight bitmap-style
+   monospace face modeled on old terminal/DOS displays. It renders visually
+   smaller/thinner than a normal monospace font at the same px size, so the
+   base font-size below is bumped up accordingly (see html,body,#root). */
+@import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 /* Same palette as control-panel (kept in sync manually -- this app is
@@ -24,9 +31,10 @@ html, body, #root {
   min-height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: 'Consolas', 'Menlo', 'Courier New', monospace;
-  font-size: 14px;
-  line-height: 1.5;
+  font-family: 'VT323', 'Consolas', 'Menlo', 'Courier New', monospace;
+  font-size: 19px;
+  letter-spacing: .02em;
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -39,8 +47,8 @@ html, body, #root {
    mouse-driven desktop browser. */
 button {
   cursor: pointer; border: 1px solid var(--border-2);
-  border-radius: 4px; padding: 10px 16px;
-  font-family: inherit; font-size: 13px; font-weight: 700;
+  border-radius: 4px; padding: 10px 18px;
+  font-family: inherit; font-size: 18px; font-weight: 700;
   letter-spacing: .06em; text-transform: uppercase;
   background: var(--surface-3); color: var(--text-2);
   transition: opacity .12s, background .12s;

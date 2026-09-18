@@ -1126,3 +1126,161 @@
     pass sạch, không có gì bị ảnh hưởng bởi thao tác `sed`.
 
 ---
+
+## 2026-09-18 (Thứ 6)
+
+- **Review commit `bdd8e76` (đêm 09-17, "SAS machine-diagnostics feature +
+  standalone read-one-machine app") theo yêu cầu người dùng "kiểm tra bản
+  commit mới nhất tối qua"** — pull về, build thật (928s clean build do đổi
+  `PLATFORMIO_CORE_DIR`, xem dưới), rồi soi kỹ từng phần thay vì chỉ tin
+  message commit.
+
+- **Bug tiền thật tìm được ngay trong review — chưa kịp chạy thật lần nào**:
+  `CMD_REFRESH_DIAGNOSTICS` gọi `report_event(..., 0, 0, ...)` — hardcode
+  `coin_in=0`/`coin_out=0`. Vì backend ghi thẳng Redis không điều kiện và
+  `jackpot.service.ts` dùng `coin_in` Redis làm mốc `lastCoinIn`, một giá
+  trị `"0"` thoáng qua (vẫn truthy vì là string) đủ để lần telemetry thật kế
+  tiếp bị hiểu nhầm thành "vừa có 1 khoản coin-in bằng NGUYÊN đời máy" và
+  cộng thẳng vào Real Jackpot pool. Sửa bằng giá trị coin_in/coin_out thật
+  đang có sẵn trong scope. Verify bằng cách tự bắn `REFRESH_DIAGNOSTICS`
+  qua API thật + đọc lại Redis/Postgres ngay sau đó — `coin_in` giữ nguyên,
+  không tụt về 0.
+
+- **Máy `tech4` cần fix riêng để build lại được sau khi bdd8e76 xoá
+  `core_dir=F:/pio` khỏi `platformio.ini`** (fix đó đúng cho MỌI máy khác,
+  nhưng đúng như comment của chính commit cảnh báo, máy này cần biến môi
+  trường thay thế) — `setx PLATFORMIO_CORE_DIR F:\pio /M` + `$env:PATH` bổ
+  sung `Git\cmd` cho phiên PowerShell hiện tại (thiếu do phiên PowerShell
+  không kế thừa PATH mới set). Build sau đó pass bình thường.
+
+- **Flash + test thật trên máy asset=318 ("G4")** — xác nhận `resp_buf[48]`
+  (fix hôm 09-17) hoạt động đúng: Meters poll (LP 0xAF) nhận đủ 40/40 byte
+  liên tục 14 chu kỳ, 0 lỗi CRC — máy này dùng 8-byte BCD/meter (khác 9-byte
+  của máy asset=7 hôm qua, xác nhận buffer 48 đủ dư cho cả 2 kiểu).
+
+- **Bug thứ 2 tìm được khi verify `asset_number`**: DB luôn trả `0` dù log
+  console rõ ràng in "machine reports 318" mỗi ~1s. Nguyên nhân:
+  `query_asset_number()` (hàm diagnostic-only) chỉ log rồi **vứt bỏ kết
+  quả**, không ghi vào `s_aft_asset_number` — field này chỉ thực sự được
+  set khi có 1 giao dịch AFT registration THẬT hoàn tất (khác hẳn ý định
+  ban đầu của tính năng diagnostics: xem asset number mà KHÔNG cần chạy
+  AFT). Sửa: lưu kết quả query vào đúng biến đó (không đụng
+  `s_aft_registered`). Verify: reboot xong, DB đúng `asset_number: "318"`,
+  `aft_registered` vẫn đúng `false`.
+
+- **Người dùng hỏi về "AFT bonus award" trong bảng Enabled Features** —
+  tra cứu xác nhận: đây là bit READ-ONLY máy tự báo cáo (LP 0xA0), project
+  chưa từng và không cần dùng tới transfer type "bonus" (`0x10`/`0x11`) —
+  mọi giao dịch AFT (kể cả trả jackpot) đều dùng `AFT_XFER_TO_MACHINE`
+  (`0x00`) bình thường. Bit này chỉ mang tính tham khảo, không ảnh hưởng
+  luồng AFT thật dù bật hay tắt.
+
+- **Yêu cầu người dùng: sửa Diagnostics UI (5 việc)** — 2 việc chữ nghĩa
+  (Bill Validator/Ticket Printer → ENABLED/DISABLED), 1 câu hỏi ("vì sao
+  không lấy được Cash Out Limit" → trả lời: KHÔNG lỗi, đúng spec Table 7.16
+  đây là giới hạn HOPPER xu, $0.00 hợp lệ trên máy TITO không hopper), và 2
+  việc thêm tính năng thật:
+  - **AFT Transfer Limit**: tra lại đúng field "Gaming machine transfer
+    limit" trong LP 0x74 (Table 8.2b) — đã tồn tại trong response máy gửi
+    (nằm gọn trong `len<40` check cũ) nhưng CHƯA TỪNG được parse. Thêm
+    field `transfer_limit_cents` vào struct + `sas_parse_aft_lock_status()`
+    + hàm query riêng `query_aft_transfer_limit()` (LP 0x74 mode
+    interrogate, không đụng lock thật). **Bài học lặp lại**: lúc tra field
+    này lần đầu bằng `pdftotext -layout`, bị báo nhầm là "2 binary" (đúng
+    kiểu lỗi xáo cột đã gặp với LP 0x1F ngày trước) — phải trích xuất lại
+    KHÔNG `-layout` mới ra đúng "5 BCD", cùng khuôn 3 field amount trước
+    nó. Từ nay: nghi ngờ field nào trong bảng SAS là phải đối chiếu bằng cả
+    2 chế độ trích xuất, không tin ngay bản `-layout`.
+  - **Thêm log "Slot Door"**: mở rộng nhận diện từ 1 loại cửa (Slot,
+    0x11/0x12) lên đủ **5 loại theo Appendix A** — Drop door (0x13/0x14),
+    Card cage (0x15/0x16), Cashbox door (0x19/0x1A) + Cashbox
+    Removed/Installed (0x1B/0x1C), Belly door (0x1D/0x1E). Dùng chung 1 cờ
+    `door_open`, không phân biệt loại cửa.
+
+- **Test thật mở cửa (3 lần, tăng dần số cửa) — máy KHÔNG BAO GIỜ gửi
+  exception cửa qua General Poll**, kể cả mở đồng thời cả 3 cửa vật lý có
+  trên bench, capture liên tục 15-30s mỗi lần chỉ toàn `0x00`/`0x1F`.
+  Không phải bug (code đã đúng cho cả 5 loại, verify bằng review tay từng
+  dòng spec) — nghi vấn công tắc cửa bench-test chưa nối đúng mạch SAS
+  giám sát, hoặc audit menu tắt tính năng báo cáo cửa.
+  - **Người dùng tự đề xuất hướng dò gián tiếp rất hay**: máy tính nội bộ
+    của game có thật sự "biết" cửa mở hay không, thử bắn AFT_PUMP xem có
+    bị chặn không? → **Đúng**: AFT bị từ chối `status=0x87` ("unable to
+    perform transfers now — door open/tilt/disabled/cashout in progress"),
+    cộng thêm field `available_transfers` bit1 (LP 0x74) cũng báo "transfer
+    from gaming machine NOT available" — 2 nguồn độc lập cùng xác nhận máy
+    biết cửa mở, chỉ là không lộ ra qua General Poll exception trên máy
+    này. Kết luận: **an toàn giao dịch AFT không hề bị ảnh hưởng** (máy tự
+    chặn ở tầng AFT, không phụ thuộc firmware có biết cửa mở hay không) —
+    chỉ mỗi hiển thị "Slot Door" trên Diagnostics không tin cậy được trên
+    bench này.
+  - **Thêm indication mới ở Logs tab** tận dụng đúng phát hiện trên:
+    `aft_status===0x87` → `AFT_BLOCKED_HARDWARE`, `aft_status===0x84` →
+    `AFT_OVER_LIMIT` — operator biết ngay lý do fail thay vì chỉ thấy hex.
+
+- **Phát hiện thêm (không phải yêu cầu trực tiếp) — cơ chế log cửa CŨ bị
+  lỗi thật từ 2026-09-14**: `mqtt-gateway.service.ts` bắt DOOR_OPEN/CLOSE
+  qua `data.exception===0x11/0x12`, nhưng `exception` chỉ phản ánh giá trị
+  của ĐÚNG 1 lần gọi `report_event()` sinh ra bản tin đó — đa số report
+  khác (Credits/Meters/Total-Coin-In poll) hardcode `SAS_EXC_NO_ACTIVITY`
+  bất kể cửa đang mở hay đóng, nên chỉ bắt được đúng khoảnh khắc chuyển
+  trạng thái, dễ bị bỏ lỡ hoàn toàn. Thêm field DB mới `door_open`
+  (persistent, forward mỗi tick từ `s_door_open`), đổi log tab sang theo
+  dõi transition của field này (giống pattern `lastBv` đã có) — đáng tin
+  cậy hơn hẳn cơ chế cũ.
+
+- **Phát hiện phụ lúc sửa log cửa — field `host_cashout_status` bị gán
+  nhầm ý nghĩa từ chính commit 2026-09-08 gốc**: comment cũ mô tả bit1 là
+  "hỗ trợ partial-to-host transfer", nhưng đối chiếu lại bản trích xuất
+  spec đúng thứ tự thì bit đó thuộc **`aft_status`** (field khác cùng
+  response LP 0x74) — `host_cashout_status` bit1 thật ra là "cashout-to-host
+  đang bật/tắt". Sửa cả comment struct lẫn dòng log `execute_aft_command()`
+  dùng đúng field. Chỉ ảnh hưởng nội dung hiển thị, không ảnh hưởng quyết
+  định AFT thật.
+
+- **Người dùng lo ngại poll cycle tràn (`POLL_CYCLE_OVERRUN`) → rà lại
+  toàn bộ tần suất poll hiện có**, trình bày bảng đầy đủ (General Poll
+  40ms, Credits 200ms, Meters/Total-Coin-In ~1s, Asset Number ~10s sau fix
+  hôm nay, AFT-retry ~10s, Diagnostics ~5 phút). Kết luận: Diagnostics đã
+  là chu kỳ THƯA nhất, không phải nguồn gây tràn. Giảm `asset_number_tick`
+  từ ~1s xuống ~10s (giá trị này thực tế gần như không đổi khi vận hành,
+  không cần hỏi mỗi giây).
+  - **Yêu cầu "giảm chu kỳ Diagnostics xuống 4s" bị hỏi lại rồi người dùng
+    tự huỷ** ("không cần đổi gì cả") sau khi được cảnh báo 4s sẽ làm tần
+    suất TĂNG ~75 lần so với ~5 phút hiện tại (ngược hẳn mục tiêu giảm
+    tràn) — **giữ nguyên ~5 phút**, không đổi.
+  - **Yêu cầu "bỏ Cash Out Limit (LP 0xA4)" cũng bị huỷ giữa chừng** cùng
+    lúc — **field này vẫn còn nguyên trong code**, chưa xoá, đừng nhầm.
+
+- **Định hướng lớn: KHÔNG mở rộng `frontend/diagnostics` trong repo này
+  nữa cho mục tiêu "thiết bị chẩn đoán cầm tay"** — người dùng quyết định
+  sẽ tự xây 1 **dự án hoàn toàn riêng biệt** (đọc toàn bộ thông tin SAS +
+  điều khiển ngoại vi qua màn hình cảm ứng/máy tính), dựa trên API REST đã
+  có của backend project này. Dùng Plan Mode để chốt phạm vi (2 vòng
+  AskUserQuestion + 1 lần người dùng tự sửa hướng giữa chừng, từ "mở rộng
+  frontend/diagnostics" sang "viết tài liệu API cho dự án khác"), rồi thu
+  hẹp lại lần nữa theo đúng yêu cầu cuối "chỉ tạo file cần thiết, không sửa
+  gì thêm cho phần tournament".
+  - Kết quả: file mới `DIAGNOSTICS_API.md` (gốc repo) — spec đầy đủ
+    `GET /api/machines` (21 field, ý nghĩa/nguồn LP/tốc độ refresh),
+    `GET /api/machines/logs`, `POST /api/machines/:id/command` (11 loại
+    lệnh), kèm response mẫu THẬT (gọi API lúc viết, không bịa).
+  - **Khảo sát thêm Appendix B (SAS 6.02) tìm cơ hội mở rộng sau này**
+    (chưa implement, chỉ ghi nhận cho tài liệu + CLAUDE.md): LP 0x94 Remote
+    Handpay Reset (reset handpay từ xa, không cần chìa khoá attendant);
+    ~15 single-meter đơn giản còn thiếu (Total Coin Out/Drop/Jackpot,
+    Games Won/Lost, True Coin In/Out, Hopper Level, tồn tiền theo mệnh
+    giá) — tất cả dùng chung 1 khuôn 4-byte BCD như LP 0x1A/0x11 đã có,
+    nên viết 1 cặp hàm generic thay vì lặp lại từng cái riêng lẻ.
+  - **Kết luận phụ đáng nhớ từ việc tra Section 8.7/14.1**: SAS 6.02 không
+    hề có Long Poll nào cho host đọc lại "giới hạn in ticket" hay ngưỡng
+    handpay theo luật (kiểu $1,200 W-2G) — đây là giá trị cấu hình trực
+    tiếp trên máy qua audit menu, chỉ biết được gián tiếp SAU KHI đã xảy ra
+    (qua status `0x87`/`0x84` khi 1 giao dịch AFT thật bị từ chối), không
+    có cách nào hỏi trước được.
+
+- Dọn file capture serial tự tạo trong lúc debug (`*.txt` rải rác trong
+  `firmware/` và `firmware/src/sas/`) trước khi commit — không phải thứ
+  cần lưu vào git.
+
+---

@@ -585,7 +585,7 @@ size_t sas_build_lp_aft_lock_status(uint8_t* buf, uint8_t address, uint8_t lock_
 }
 
 SasAftLockStatusResponse sas_parse_aft_lock_status(const uint8_t* buf, size_t len) {
-    SasAftLockStatusResponse resp = {0, 0xFF, 0, 0, 0, 0, 0, 0, false};
+    SasAftLockStatusResponse resp = {0, 0xFF, 0, 0, 0, 0, 0, 0, 0, false};
     if (len < 40) return resp;
     if (!crc16_verify(buf, len)) return resp;
     if (buf[1] != SAS_CMD_AFT_LOCK_STATUS) return resp;
@@ -601,6 +601,12 @@ SasAftLockStatusResponse sas_parse_aft_lock_status(const uint8_t* buf, size_t le
     resp.current_cashable_amount      = bcd_to_uint32(&buf[12], 5);
     resp.current_restricted_amount    = bcd_to_uint32(&buf[17], 5);
     resp.current_nonrestricted_amount = bcd_to_uint32(&buf[22], 5);
+    // Gaming machine transfer limit -- 5-byte BCD, right after the 3
+    // amount fields (Table 8.2b continued: cashable, restricted,
+    // nonrestricted, transfer limit, restricted expiration, pool ID, CRC).
+    // Already within the len<40 guard above -- this field was always part
+    // of the frame this function required, just not extracted until now.
+    resp.transfer_limit_cents = bcd_to_uint32(&buf[27], 5);
     resp.valid = true;
     return resp;
 }

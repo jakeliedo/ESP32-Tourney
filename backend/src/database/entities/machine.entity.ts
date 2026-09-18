@@ -49,6 +49,15 @@ export class MachineEntity {
   @Column({ type: 'bigint', nullable: true })
   cash_out_limit_cents: number | null;
 
+  // Added 2026-09-18: LP 0x74's "gaming machine transfer limit" -- the
+  // actual AFT-reject-vs-handpay threshold. Distinct from
+  // cash_out_limit_cents above, which is the LP 0xA4 HOPPER coin-out limit
+  // only (0 is a normal reading on a hopper-less/ticket-only cabinet) --
+  // see the comment on MachineEvent.aft_transfer_limit_cents in
+  // sas_polling.h for the full distinction.
+  @Column({ type: 'bigint', nullable: true })
+  aft_transfer_limit_cents: number | null;
+
   @Column({ type: 'int', nullable: true })
   enabled_features: number | null;
 
@@ -57,6 +66,14 @@ export class MachineEntity {
 
   @Column({ type: 'boolean', nullable: true })
   bill_config_ok: boolean | null;
+
+  // Added 2026-09-18: persistent "is the slot door open right now" state,
+  // forwarded from firmware on every telemetry tick (unlike the old
+  // exception===0x11/0x12 detection this replaces -- see
+  // mqtt-gateway.service.ts's processTelemetry() comment for why that
+  // didn't reliably show up). null = not yet known.
+  @Column({ type: 'boolean', nullable: true })
+  door_open: boolean | null;
 
   @Column({ type: 'int', nullable: true })
   last_cycle_overrun_ms: number | null;

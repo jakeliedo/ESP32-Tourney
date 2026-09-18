@@ -39,16 +39,26 @@ function Value({ state, yes = 'YES', no = 'NO' }: { state: TriState; yes?: strin
   return <span style={{ color, fontWeight: 700 }}>{label}</span>;
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+// `wide`: lay the section's own Rows out as a multi-column grid instead of
+// a single stacked column -- for a section with many rows (Enabled
+// Features) given the full window width, so it uses that width instead of
+// turning into one long vertical list on a wide monitor.
+function Section({ title, children, wide }: { title: string; children: React.ReactNode; wide?: boolean }) {
   return (
-    <div style={{ border: '1px solid var(--border)', borderRadius: 6, marginBottom: 12 }}>
+    <div style={{ border: '1px solid var(--border)', borderRadius: 6, height: '100%' }}>
       <div style={{
-        fontSize: 11, fontWeight: 700, letterSpacing: '.14em', color: 'var(--gold)',
-        borderBottom: '1px solid var(--border)', padding: '6px 12px', textTransform: 'uppercase',
+        fontSize: 15, fontWeight: 700, letterSpacing: '.14em', color: 'var(--gold)',
+        borderBottom: '1px solid var(--border)', padding: '7px 14px', textTransform: 'uppercase',
       }}>
         {title}
       </div>
-      <div style={{ padding: '8px 12px' }}>{children}</div>
+      <div style={wide ? {
+        padding: '8px 20px', display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+        columnGap: 32,
+      } : { padding: '6px 14px' }}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -57,8 +67,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <div style={{
       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      gap: 12, padding: '4px 0', borderBottom: '1px solid var(--border-2)',
-      fontSize: 13,
+      gap: 16, padding: '5px 0', borderBottom: '1px solid var(--border-2)',
+      fontSize: 17,
     }}>
       <span style={{ color: 'var(--text-2)' }}>{label}</span>
       <span style={{ fontVariantNumeric: 'tabular-nums', textAlign: 'right' }}>{children}</span>
@@ -66,65 +76,81 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-function MachineDetail({ m, onRefresh, busy }: { m: Machine; onRefresh: () => void; busy: boolean }) {
+function MachineDetail({ m }: { m: Machine }) {
   const features = m.enabled_features;
   const validationStyle = features != null ? (features >> 5) & 0x03 : null;
   const meterModel = features != null ? (features >> 8) & 0x03 : null;
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
-          Last updated: {new Date(m.updated_at).toLocaleString()}
-        </span>
-        <button disabled={busy} onClick={onRefresh}>{busy ? 'Refreshing…' : 'Refresh This Machine'}</button>
+      <div style={{
+        display: 'grid', gap: 16, alignItems: 'start', marginBottom: 16,
+        gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+      }}>
+        <Section title="Identity">
+          <Row label="Machine ID">{m.machine_id}</Row>
+          <Row label="Display Name">{m.display_name || '—'}</Row>
+          <Row label="SAS Version">{m.sas_version || <Value state="unknown" />}</Row>
+          <Row label="Serial Number">{m.serial_number || <Value state="unknown" />}</Row>
+          <Row label="Asset Number (LP 0x73)">{m.asset_number ?? <Value state="unknown" />}</Row>
+          <Row label="AFT Registered"><Value state={tri(m.aft_registered)} /></Row>
+        </Section>
+
+        <Section title="Denomination (LP 0x1F)">
+          <Row label="Denom Code">{m.denom_code != null ? `0x${m.denom_code.toString(16).padStart(2, '0').toUpperCase()}` : <Value state="unknown" />}</Row>
+          <Row label="Denom Value">
+            {m.denom_value_x10000 ? `$${(m.denom_value_x10000 / 10000).toFixed(4)}` : <Value state="unknown" />}
+          </Row>
+        </Section>
+
+        <Section title="Live State">
+          <Row label="Status">{m.status.toUpperCase()}</Row>
+          <Row label="Credits">${(m.credits / 100).toFixed(2)}</Row>
+          <Row label="Coin In">{m.coin_in.toLocaleString()}</Row>
+          <Row label="Coin Out">{m.coin_out.toLocaleString()}</Row>
+        </Section>
+
+        <Section title="Guards / Config Checks">
+          <Row label="Slot Door">
+            {m.door_open == null ? <Value state="unknown" /> : m.door_open ? (
+              <span style={{ color: 'var(--handpay)', fontWeight: 700 }}>OPEN</span>
+            ) : (
+              <span style={{ color: 'var(--online)', fontWeight: 700 }}>CLOSED</span>
+            )}
+          </Row>
+          <Row label="Bill Validator (LP 0x06/0x07)">
+            <Value state={tri(m.bv_enabled)} yes="ENABLED" no="DISABLED" />
+          </Row>
+          <Row label="Ticket Printer (LP 0x7B)">
+            <Value state={tri(m.printer_enabled)} yes="ENABLED" no="DISABLED" />
+          </Row>
+          <Row label="RTE Reporting OFF Guard (LP 0x0E)"><Value state={tri(m.rte_guard_ok)} yes="OFF (OK)" no="FAILED" /></Row>
+          <Row label="Bill Config Write ACK'd (LP 0x08)"><Value state={tri(m.bill_config_ok)} yes="OK" no="FAILED" /></Row>
+          <Row label="Cash Out Limit (LP 0xA4, hopper only)">
+            {m.cash_out_limit_cents != null ? `$${(m.cash_out_limit_cents / 100).toFixed(2)}` : <Value state="unknown" />}
+          </Row>
+          <Row label="AFT Transfer Limit (LP 0x74)">
+            {m.aft_transfer_limit_cents != null ? `$${(m.aft_transfer_limit_cents / 100).toFixed(2)}` : <Value state="unknown" />}
+          </Row>
+          <Row label="Poll Cycle (40ms budget)">
+            {m.last_cycle_overrun_ms ? (
+              <span style={{ color: 'var(--disabled)', fontWeight: 700 }}>{m.last_cycle_overrun_ms}ms OVERRUN</span>
+            ) : (
+              <Value state="yes" yes="OK" />
+            )}
+          </Row>
+          <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 6, lineHeight: 1.5 }}>
+            Cash Out Limit = máy trả tối đa bao nhiêu <em>từ hopper xu</em> (SAS Table 7.16) —
+            $0.00 là bình thường trên máy TITO không có hopper vật lý, không phải lỗi đọc dữ liệu.
+            AFT Transfer Limit (LP 0x74) mới là số quyết định 1 lần trả AFT có bị từ chối
+            (status 0x84, phải chuyển sang handpay) hay không.
+          </div>
+        </Section>
       </div>
 
-      <Section title="Identity">
-        <Row label="Machine ID">{m.machine_id}</Row>
-        <Row label="Display Name">{m.display_name || '—'}</Row>
-        <Row label="SAS Version">{m.sas_version || <Value state="unknown" />}</Row>
-        <Row label="Serial Number">{m.serial_number || <Value state="unknown" />}</Row>
-        <Row label="Asset Number (LP 0x73)">{m.asset_number ?? <Value state="unknown" />}</Row>
-        <Row label="AFT Registered"><Value state={tri(m.aft_registered)} /></Row>
-      </Section>
-
-      <Section title="Denomination (LP 0x1F)">
-        <Row label="Denom Code">{m.denom_code != null ? `0x${m.denom_code.toString(16).padStart(2, '0').toUpperCase()}` : <Value state="unknown" />}</Row>
-        <Row label="Denom Value">
-          {m.denom_value_x10000 ? `$${(m.denom_value_x10000 / 10000).toFixed(4)}` : <Value state="unknown" />}
-        </Row>
-      </Section>
-
-      <Section title="Live State">
-        <Row label="Status">{m.status.toUpperCase()}</Row>
-        <Row label="Credits">${(m.credits / 100).toFixed(2)}</Row>
-        <Row label="Coin In">{m.coin_in.toLocaleString()}</Row>
-        <Row label="Coin Out">{m.coin_out.toLocaleString()}</Row>
-      </Section>
-
-      <Section title="Guards / Config Checks">
-        <Row label="Bill Validator Enabled (LP 0x06/0x07)"><Value state={tri(m.bv_enabled)} /></Row>
-        <Row label="Printer/Ticket Locked Down (LP 0x7B)">
-          <Value state={tri(m.printer_enabled)} yes="UNLOCKED" no="LOCKED (expected)" />
-        </Row>
-        <Row label="RTE Reporting OFF Guard (LP 0x0E)"><Value state={tri(m.rte_guard_ok)} yes="OFF (OK)" no="FAILED" /></Row>
-        <Row label="Bill Config Write ACK'd (LP 0x08)"><Value state={tri(m.bill_config_ok)} yes="OK" no="FAILED" /></Row>
-        <Row label="Cash Out Limit (LP 0xA4)">
-          {m.cash_out_limit_cents != null ? `$${(m.cash_out_limit_cents / 100).toFixed(2)}` : <Value state="unknown" />}
-        </Row>
-        <Row label="Poll Cycle (40ms budget)">
-          {m.last_cycle_overrun_ms ? (
-            <span style={{ color: 'var(--disabled)', fontWeight: 700 }}>{m.last_cycle_overrun_ms}ms OVERRUN</span>
-          ) : (
-            <Value state="yes" yes="OK" />
-          )}
-        </Row>
-      </Section>
-
-      <Section title="Enabled Features (LP 0xA0) — full bit breakdown">
+      <Section title="Enabled Features (LP 0xA0) — full bit breakdown" wide>
         {features == null ? (
-          <div style={{ color: 'var(--text-3)', fontSize: 12, padding: '4px 0' }}>Not yet queried — press Refresh</div>
+          <div style={{ color: 'var(--text-3)', fontSize: 16, padding: '4px 0' }}>Not yet queried — press Refresh</div>
         ) : (
           <>
             <Row label="Raw value">0x{features.toString(16).toUpperCase().padStart(6, '0')}</Row>
@@ -176,31 +202,45 @@ export default function App() {
   };
 
   return (
-    <div style={{ maxWidth: 640, margin: '0 auto', padding: '20px 16px' }}>
-      <h1 style={{ fontSize: 15, letterSpacing: '.1em', color: 'var(--gold)', marginBottom: 14 }}>
-        MACHINE DIAGNOSTICS
-      </h1>
+    <div style={{ maxWidth: 1800, margin: '0 auto', padding: '20px 32px 40px' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 20,
+        marginBottom: 20,
+      }}>
+        <h1 style={{ fontSize: 24, letterSpacing: '.1em', color: 'var(--gold)', whiteSpace: 'nowrap' }}>
+          MACHINE DIAGNOSTICS
+        </h1>
 
-      <select
-        value={selectedId}
-        onChange={e => setSelectedId(e.target.value)}
-        style={{
-          width: '100%', padding: '10px 12px', marginBottom: 16,
-          background: 'var(--surface-3)', color: 'var(--text)',
-          border: '1px solid var(--border-2)', borderRadius: 4,
-          fontFamily: 'inherit', fontSize: 14,
-        }}
-      >
-        {machines.length === 0 && <option value="">No machines connected</option>}
-        {machines.map(m => (
-          <option key={m.machine_id} value={m.machine_id}>
-            {m.machine_id}{m.display_name ? ` — ${m.display_name}` : ''} [{m.status}]
-          </option>
-        ))}
-      </select>
+        <select
+          value={selectedId}
+          onChange={e => setSelectedId(e.target.value)}
+          style={{
+            padding: '9px 14px', minWidth: 320,
+            background: 'var(--surface-3)', color: 'var(--text)',
+            border: '1px solid var(--border-2)', borderRadius: 4,
+            fontFamily: 'inherit', fontSize: 18,
+          }}
+        >
+          {machines.length === 0 && <option value="">No machines connected</option>}
+          {machines.map(m => (
+            <option key={m.machine_id} value={m.machine_id}>
+              {m.machine_id}{m.display_name ? ` — ${m.display_name}` : ''} [{m.status}]
+            </option>
+          ))}
+        </select>
+
+        {selected && (
+          <>
+            <span style={{ fontSize: 16, color: 'var(--text-3)', marginLeft: 'auto' }}>
+              Last updated: {new Date(selected.updated_at).toLocaleString()}
+            </span>
+            <button disabled={busy} onClick={doRefresh}>{busy ? 'Refreshing…' : 'Refresh This Machine'}</button>
+          </>
+        )}
+      </div>
 
       {selected ? (
-        <MachineDetail m={selected} onRefresh={doRefresh} busy={busy} />
+        <MachineDetail m={selected} />
       ) : (
         <div style={{ color: 'var(--text-3)', textAlign: 'center', padding: 40 }}>No machine selected</div>
       )}

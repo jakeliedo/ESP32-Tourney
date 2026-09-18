@@ -217,6 +217,24 @@
 #define SAS_EXC_NO_ACTIVITY         0x00
 #define SAS_EXC_SLOT_DOOR_OPENED    0x11
 #define SAS_EXC_SLOT_DOOR_CLOSED    0x12
+// Added 2026-09-18: SAS 6.02 Appendix A defines FIVE separate physical-
+// access exception pairs, not just the main slot door -- found while
+// investigating "I opened a door but Diagnostics still shows CLOSED": the
+// door actually opened on the test cabinet may not be the main slot door
+// at all (drop door / cashbox door / belly door / card cage each report a
+// DIFFERENT exception code). Previously only 0x11/0x12 were recognized;
+// every other one of these fell into the unnamed default case ("Unknown"
+// in exc_name()) and never touched s_door_open/jackpot_freeze.
+#define SAS_EXC_DROP_DOOR_OPENED    0x13
+#define SAS_EXC_DROP_DOOR_CLOSED    0x14
+#define SAS_EXC_CARD_CAGE_OPENED    0x15
+#define SAS_EXC_CARD_CAGE_CLOSED    0x16
+#define SAS_EXC_CASHBOX_DOOR_OPENED 0x19
+#define SAS_EXC_CASHBOX_DOOR_CLOSED 0x1A
+#define SAS_EXC_CASHBOX_REMOVED     0x1B  // not a door per se, but the same "physical access, freeze wager-inference" concern applies
+#define SAS_EXC_CASHBOX_INSTALLED   0x1C
+#define SAS_EXC_BELLY_DOOR_OPENED   0x1D
+#define SAS_EXC_BELLY_DOOR_CLOSED   0x1E
 #define SAS_EXC_CASHOUT_PRESSED     0x66  // was 0x26 (wrong)
 #define SAS_EXC_HANDPAY_PENDING     0x51  // was 0x44 ("Reel 4 tilt", wrong)
 #define SAS_EXC_CASHOUT_TICKET      0x3D  // was 0x4C ("$100.00 bill accepted", wrong)
@@ -283,11 +301,37 @@ typedef struct {
     uint32_t asset_number;
     uint8_t  game_lock_status;        // 0x00=locked, 0x40=lock pending, 0xFF=not locked
     uint8_t  available_transfers;     // bit1 = "transfer from gaming machine OK"
-    uint8_t  host_cashout_status;     // bit1 = "transfer to host of less than full available amount allowed" (i.e. partial support)
-    uint8_t  aft_status;              // bit3 = AFT registered, bit7 = any AFT enabled
+    // Fixed 2026-09-18: this comment previously described AFT status bit1
+    // ("transfer to host of less than full available amount allowed", i.e.
+    // partial-transfer support) -- verified against the non-mangled Table
+    // 8.2b text extraction that host_cashout_status's OWN bit1 is actually
+    // "0 = cashout to host currently disabled, 1 = currently enabled" (a
+    // different concept: whether host-cashout is turned on at all, not
+    // whether it can be partial). The real "partial support" bit lives on
+    // aft_status below, bit1 -- see execute_aft_command()'s log line, which
+    // read the wrong field until this fix (informational log text only,
+    // never affected any actual transfer decision since this project
+    // always requests a FULL transfer for the exact queried amount and
+    // never relies on partial-transfer support either way).
+    uint8_t  host_cashout_status;     // bit0 = host-cashout forced/controllable, bit1 = 0/1 = cashout-to-host currently disabled/enabled, bit2 = soft/hard mode
+    uint8_t  aft_status;              // bit1 = "transfer to host of less than full available amount allowed" (partial support), bit3 = AFT registered, bit7 = any AFT enabled
     uint32_t current_cashable_amount;    // In CENTS already (not accounting-denom units) -- Table 8.2b
     uint32_t current_restricted_amount;  // In CENTS already
     uint32_t current_nonrestricted_amount; // In CENTS already
+    // Added 2026-09-18 (machine-diagnostics "handpay vs AFT" question):
+    // Table 8.2b's "Gaming machine transfer limit" -- "Maximum amount that
+    // may currently be transferred to the credit meter, in cents". Same 5-
+    // byte BCD shape and already-in-cents convention as the 3 amount
+    // fields above (confirmed against the non-mangled text extraction of
+    // SAS 6.02.pdf, Table 8.2b continued -- an earlier -layout extraction
+    // mis-showed this as "2 binary", which was a column-alignment artifact
+    // of that extraction mode, not the real field). A transfer request
+    // above this amount is exactly what AFT_STATUS_OVER_LIMIT (0x84,
+    // "Transfer amount exceeds the gaming machine's transfer limit") will
+    // reject -- reading this field lets the host know ahead of time
+    // whether a payout will need to be split/handpaid instead of sent as
+    // one AFT transfer.
+    uint32_t transfer_limit_cents;
     bool     valid;
 } SasAftLockStatusResponse;
 

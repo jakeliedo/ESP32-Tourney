@@ -46,8 +46,10 @@ interface TelemetryPayload {
   printer_enabled?: boolean;
   enabled_features?: number;
   cash_out_limit_cents?: number;
+  aft_transfer_limit_cents?: number;
   rte_guard_ok?: boolean;
   bill_config_ok?: boolean;
+  door_open?: boolean;
   last_cycle_overrun_ms?: number;
   serial_number?: string;
   sas_version?: string;
@@ -83,6 +85,10 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
   private lastCashOutOk   = new Map<string, boolean>();
   private lastRteGuardOk  = new Map<string, boolean>();
   private lastBillConfigOk = new Map<string, boolean>();
+  // Added 2026-09-18, replaces the old exception===0x11/0x12 check (see
+  // the comment at its call site) with a proper transition tracker on the
+  // persistent door_open field, same style as lastBv/lastPrinter.
+  private lastDoorOpen    = new Map<string, boolean>();
   // Venue-specific floor for LP 0xA4 Cash Out Limit, from .env
   // (MIN_CASH_OUT_LIMIT_CENTS) -- 0 disables the check. Set in onModuleInit.
   private minCashOutLimitCents = 0;
@@ -235,8 +241,10 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
         // credits/coin_in/coin_out are already written unconditionally.
         enabled_features:      data.enabled_features      ?? null,
         cash_out_limit_cents:  data.cash_out_limit_cents   ?? null,
+        aft_transfer_limit_cents: data.aft_transfer_limit_cents ?? null,
         rte_guard_ok:          data.rte_guard_ok           ?? null,
         bill_config_ok:        data.bill_config_ok         ?? null,
+        door_open:             data.door_open              ?? null,
         last_cycle_overrun_ms: data.last_cycle_overrun_ms  ?? null,
         // Identity/config fields (2026-09-17) -- firmware omits
         // serial_number/sas_version from the JSON entirely until known
@@ -287,8 +295,49 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
     const log = (severity: LogEntry['severity'], code: string, message: string) =>
       entries.push({ machineId, ts: Date.now(), severity, code, message });
 
-    if (data.exception === 0x11) log('abnormal', 'DOOR_OPEN', 'Slot door OPENED');
-    if (data.exception === 0x12) log('info', 'DOOR_CLOSE', 'Slot door closed');
+    // Added 2026-09-18: surface a clear, human-readable INDICATION when an
+    // AFT transfer was blocked by a real machine-side hardware/physical-
+    // state condition, not a config mistake -- found while investigating a
+    // test machine that doesn't report door-open via General Poll exception
+    // at all (0x11/0x13/.../0x1D never fire) but DOES correctly reject AFT
+    // with status 0x87 while a door is open. Without this, an operator just
+    // sees "AFT FAILED" with a bare hex code and no idea why. Table 8.3e
+    // (SAS 6.02): 0x87 = "gaming machine unable to perform transfers at this
+    // time (door open, tilt, disabled, cashout in progress, etc.)" -- the
+    // AFT-layer equivalent of a door-open signal for machines/setups where
+    // the General Poll exception path isn't wired. No transition-tracking
+    // needed here (unlike the guards below) -- every failed txn_id is its
+    // own distinct event, not an ongoing state.
+    if (data.txn_id && data.aft_status === 0x87) {
+      log('abnormal', 'AFT_BLOCKED_HARDWARE',
+        'AFT transfer blocked by machine hardware state (door open / tilt / disabled / cashout in progress)');
+    } else if (data.txn_id && data.aft_status === 0x84) {
+      log('abnormal', 'AFT_OVER_LIMIT',
+        "AFT transfer rejected: amount exceeds the gaming machine's transfer limit (see Diagnostics)");
+    }
+
+    // Was keyed off `data.exception === 0x11/0x12` -- broken in practice
+    // (found 2026-09-18): `exception` only reflects whatever exc value was
+    // passed to the ONE report_event() call that produced this specific
+    // telemetry message, and most call sites (Credits/Meters/Total-Coin-In/
+    // diagnostics polls) hardcode SAS_EXC_NO_ACTIVITY regardless of real
+    // door state -- so this only ever matched the single one-shot telemetry
+    // message fired at the exact instant the door opened/closed, easy to
+    // never see. `door_open` (added 2026-09-18) is forwarded on EVERY
+    // telemetry message from firmware's persistent door-state flag, so a
+    // plain transition check here (like lastBv/lastPrinter below) actually
+    // catches it.
+    if (data.door_open !== undefined) {
+      const prevDoorOpen = this.lastDoorOpen.get(machineId);
+      if (prevDoorOpen !== undefined && prevDoorOpen !== data.door_open) {
+        log(
+          data.door_open ? 'abnormal' : 'info',
+          data.door_open ? 'DOOR_OPEN' : 'DOOR_CLOSE',
+          data.door_open ? 'Slot door OPENED' : 'Slot door closed',
+        );
+      }
+      this.lastDoorOpen.set(machineId, data.door_open);
+    }
 
     if (statusChanged && newStatus === MachineStatus.DISABLED) {
       log('abnormal', 'MACHINE_DISABLED', 'Machine DISABLED');

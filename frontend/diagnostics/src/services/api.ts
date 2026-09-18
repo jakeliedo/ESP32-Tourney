@@ -20,8 +20,10 @@ export interface Machine {
   printer_enabled: boolean | null;
   enabled_features: number | null;
   cash_out_limit_cents: number | null;
+  aft_transfer_limit_cents: number | null;
   rte_guard_ok: boolean | null;
   bill_config_ok: boolean | null;
+  door_open: boolean | null;
   last_cycle_overrun_ms: number | null;
 
   serial_number: string | null;

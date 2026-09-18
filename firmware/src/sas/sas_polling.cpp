@@ -81,8 +81,18 @@ static const char* exc_name(uint8_t exc) {
         case 0x00: return "No activity";
         case 0x11: return "Slot door OPENED";
         case 0x12: return "Slot door CLOSED";
+        case 0x13: return "Drop door OPENED";
+        case 0x14: return "Drop door CLOSED";
+        case 0x15: return "Card cage OPENED";
+        case 0x16: return "Card cage CLOSED";
         case 0x17: return "AC power applied";
         case 0x18: return "AC power lost";
+        case 0x19: return "Cashbox door OPENED";
+        case 0x1A: return "Cashbox door CLOSED";
+        case 0x1B: return "Cashbox REMOVED";
+        case 0x1C: return "Cashbox INSTALLED";
+        case 0x1D: return "Belly door OPENED";
+        case 0x1E: return "Belly door CLOSED";
         case 0x1F: return "No activity, waiting for player input (obsolete)";
         case 0x20: return "General tilt";
         case 0x27: return "Cashbox full detected";
@@ -167,6 +177,41 @@ static uint32_t s_cash_out_limit_cents   = 0;
 static bool     s_rte_guard_ok           = false;
 static bool     s_bill_config_ok         = false;
 static uint16_t s_last_cycle_overrun_ms  = 0;  // worst overrun since last report_event(); reset to 0 after each report
+// Added 2026-09-18: LP 0x74's "gaming machine transfer limit" (Table 8.2b),
+// queried read-only for diagnostics -- distinct from the LP 0x74 query
+// execute_aft_command() already does inline right before a real AFT OUT
+// (that one only cares about current_cashable_amount for a live transfer).
+// Lets an operator see ahead of time whether a payout amount would exceed
+// this and get rejected with AFT_STATUS_OVER_LIMIT (0x84) instead of a
+// full AFT transfer -- i.e. whether it would need a handpay.
+static bool     s_aft_transfer_limit_known  = false;
+static uint32_t s_aft_transfer_limit_cents  = 0;
+// Door state (SAS_EXC_SLOT_DOOR_OPENED/CLOSED, 0x11/0x12) mirrored into a
+// persistent flag for the machine-diagnostics snapshot -- the exception
+// code itself (MachineEvent.exception_code) only reflects the LAST
+// reported exception at the moment of a report_event() call, not "is the
+// door open right now" as an ongoing state, and jackpot_freeze (which
+// already tracks this exact thing) is local to sas_polling_task(), not
+// visible to report_event().
+static bool     s_door_open = false;
+
+// Added 2026-09-18: mirror of sas_polling_task()'s own last_credits/
+// last_coin_out/coin_in-source locals, refreshed once per loop iteration
+// (see the bottom of sas_polling_task(), right by the cycle-timing check)
+// so functions OUTSIDE that loop -- namely execute_aft_command(), a
+// standalone static function with no access to those locals -- can report
+// real current values instead of hardcoding 0. Found 2026-09-18: every AFT
+// PUMP/WITHDRAW completion (success OR failure, e.g. the 0x87 "door open"
+// rejection) was calling report_event(SAS_EXC_AFT_TRANSFER_DONE, 0, 0, 0,
+// ...), publishing telemetry with credits=0/coin_in=0/coin_out=0 on EVERY
+// AFT transaction -- not just the rare CMD_REFRESH_DIAGNOSTICS case fixed
+// earlier the same day. credits=0 briefly hits the live tournament
+// leaderboard (a real player's score flashing to $0.00 on every buy-in/
+// cash-out) and coin_in=0 carries the exact same false-jackpot-addition
+// risk documented at the CMD_REFRESH_DIAGNOSTICS fix.
+static uint32_t s_last_credits_cents = 0;
+static uint32_t s_last_coin_in_cents = 0;
+static uint32_t s_last_coin_out_cents = 0;
 
 // ── Internal UART helpers ──────────────────────────────────────
 
@@ -378,8 +423,10 @@ static void report_event(uint8_t exc, uint32_t credits,
     ev.printer_enabled = s_printer_enabled;
     ev.enabled_features     = s_enabled_features;
     ev.cash_out_limit_cents = s_cash_out_limit_cents;
+    ev.aft_transfer_limit_cents = s_aft_transfer_limit_cents;
     ev.rte_guard_ok         = s_rte_guard_ok;
     ev.bill_config_ok       = s_bill_config_ok;
+    ev.door_open             = s_door_open;
     ev.last_cycle_overrun_ms = s_last_cycle_overrun_ms;
     s_last_cycle_overrun_ms = 0;  // report-and-clear, like a hardware sticky-bit
     // Identity/config (2026-09-17) -- already computed once at boot, just
@@ -632,7 +679,7 @@ static void execute_aft_command(const ServerCommand* cmd) {
         size_t lp74_n = sas_receive(lp74_resp, sizeof(lp74_resp), SAS_LONG_POLL_TIMEOUT);
         SasAftLockStatusResponse lock_status = (lp74_n > 0)
             ? sas_parse_aft_lock_status(lp74_resp, lp74_n)
-            : SasAftLockStatusResponse{0, 0xFF, 0, 0, 0, 0, 0, 0, false};
+            : SasAftLockStatusResponse{0, 0xFF, 0, 0, 0, 0, 0, 0, 0, false};
 
         if (!lock_status.valid) {
             ESP_LOGW(TAG, "AFT OUT: LP 0x74 status query failed (n=%d), aborting withdraw  txn=%s",
@@ -649,10 +696,14 @@ static void execute_aft_command(const ServerCommand* cmd) {
             nvs_clear_pending_txn();
             return;
         }
+        // Fixed 2026-09-18: was reading host_cashout_status bit1 (actually
+        // "cashout-to-host currently enabled", unrelated) for this log --
+        // partial-transfer support is aft_status bit1. Log text only, never
+        // affected the actual transfer (always FULL, see above).
         ESP_LOGI(TAG, "AFT OUT: machine reports %lu cents cashable (partial-to-host %s), "
                       "requesting exact full transfer  txn=%s",
                  (unsigned long)lock_status.current_cashable_amount,
-                 (lock_status.host_cashout_status & 0x02) ? "supported" : "NOT supported",
+                 (lock_status.aft_status & 0x02) ? "supported" : "NOT supported",
                  cmd->txn_id);
 
         transfer_code   = AFT_CODE_TRANSFER_FULL;
@@ -712,7 +763,11 @@ static void execute_aft_command(const ServerCommand* cmd) {
                 ESP_LOGW(TAG, "AFT FAIL: status=0x%02X  txn=%s",
                          final_status, cmd->txn_id);
             }
-            report_event(SAS_EXC_AFT_TRANSFER_DONE, 0, 0, 0,
+            // Fixed 2026-09-18: was hardcoding credits/coin_in/coin_out to
+            // 0 here (see s_last_credits_cents's doc comment) -- use the
+            // cross-function mirrors instead, refreshed every 40ms cycle.
+            report_event(SAS_EXC_AFT_TRANSFER_DONE, s_last_credits_cents,
+                         s_last_coin_in_cents, s_last_coin_out_cents,
                          final_status, cmd->txn_id);
         } else {
             ESP_LOGW(TAG, "AFT: response CRC/parse error  n=%d  txn=%s",
@@ -880,6 +935,44 @@ static bool query_cash_out_limit() {
 }
 
 /**
+ * Query LP 0x74 (AFT Game Lock and Status) purely for its "gaming machine
+ * transfer limit" field (Table 8.2b) -- read-only diagnostics, same
+ * AFT_LOCK_CODE_INTERROGATE mode execute_aft_command() already uses before
+ * a real AFT OUT, so this never requests an actual lock or disturbs any
+ * in-progress transfer. Added 2026-09-18 so an operator can see ahead of
+ * time whether a tournament payout amount would exceed this machine's
+ * transfer limit and get rejected with AFT_STATUS_OVER_LIMIT (0x84) --
+ * i.e. whether it would need a handpay instead of a normal AFT transfer.
+ */
+static bool query_aft_transfer_limit() {
+    uint8_t frame[8];
+    uint8_t resp[48];
+
+    size_t frame_len = sas_build_lp_aft_lock_status(frame, g_machine_id,
+                                                      AFT_LOCK_CODE_INTERROGATE, 0, 0);
+    sas_send_frame(frame, frame_len);
+    size_t n = sas_receive(resp, sizeof(resp), SAS_LONG_POLL_TIMEOUT);
+
+    if (n == 0) {
+        ESP_LOGW(TAG, "AFT transfer limit (LP 0x74): no response from machine");
+        return false;
+    }
+
+    SasAftLockStatusResponse info = sas_parse_aft_lock_status(resp, n);
+    if (!info.valid) {
+        ESP_LOGW(TAG, "AFT transfer limit (LP 0x74): response CRC/parse error (n=%d)", (int)n);
+        return false;
+    }
+
+    s_aft_transfer_limit_cents = info.transfer_limit_cents;
+    s_aft_transfer_limit_known = true;
+    ESP_LOGI(TAG, "AFT transfer limit: %lu.%02lu",
+             (unsigned long)(s_aft_transfer_limit_cents / 100),
+             (unsigned long)(s_aft_transfer_limit_cents % 100));
+    return true;
+}
+
+/**
  * Force Real Time Event Reporting OFF (LP 0x0E, enable=false). This
  * project's whole polling model (General Poll + Type-R/M/S long polls,
  * see sas_general_poll()/sas_receive() above) assumes classic single-byte
@@ -915,6 +1008,20 @@ static bool enforce_rte_reporting_off() {
  * in the serial log at boot even if no AFT transfer is ever triggered;
  * perform_aft_registration()'s own step 0 does the same query
  * independently when a real AFT transfer actually needs it.
+ *
+ * On success, also caches the result into s_aft_asset_number -- the SAME
+ * variable perform_aft_registration() eventually writes on a completed
+ * registration -- so the machine-diagnostics MachineEvent.asset_number
+ * field (report_event(), forwarded to telemetry/DB) actually gets
+ * populated from this passive query, matching the field's own doc comment
+ * in sas_polling.h ("LP 0x73 (query OR registration)"). Found 2026-09-18:
+ * this function's result was previously only ever logged and then
+ * discarded at both call sites, so a machine that never completes a real
+ * AFT transfer would show asset_number=0 forever in the Diagnostics view
+ * despite the console clearly logging the real value every ~1s. This does
+ * NOT set s_aft_registered -- a technician reading the asset number here
+ * does not imply this board has registered for AFT with the machine.
+ *
  * Returns the asset number, or 0 if the machine has none configured / did
  * not respond / sent an invalid frame.
  */
@@ -943,6 +1050,7 @@ static uint32_t query_asset_number() {
         return 0;
     }
 
+    s_aft_asset_number = q.asset_number;
     ESP_LOGI(TAG, "Asset number query: machine reports %lu", (unsigned long)q.asset_number);
     return q.asset_number;
 }
@@ -1214,6 +1322,9 @@ void sas_polling_task(void* pvParameters) {
     for (int attempt = 0; attempt < 3 && !s_cash_out_limit_known; attempt++) {
         query_cash_out_limit();
     }
+    for (int attempt = 0; attempt < 3 && !s_aft_transfer_limit_known; attempt++) {
+        query_aft_transfer_limit();
+    }
     for (int attempt = 0; attempt < 3; attempt++) {
         if (enforce_rte_reporting_off()) break;
     }
@@ -1243,8 +1354,13 @@ void sas_polling_task(void* pvParameters) {
                     // can be stale by up to a poll cycle.
                     if (s_state == SLOT_STATE_DISABLED) {
                         ESP_LOGW(TAG, "AFT OUT rejected: machine is DISABLED  txn=%s", cmd.txn_id);
-                        report_event(SAS_EXC_AFT_TRANSFER_DONE, 0, 0, 0,
-                                     AFT_STATUS_BUSY, cmd.txn_id);
+                        // Fixed 2026-09-18: was hardcoding credits/coin_in/
+                        // coin_out to 0 (see s_last_credits_cents's doc
+                        // comment for why that's unsafe) -- these locals are
+                        // already in scope here, no need for the statics.
+                        report_event(SAS_EXC_AFT_TRANSFER_DONE, last_credits,
+                                     real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                                     last_coin_out, AFT_STATUS_BUSY, cmd.txn_id);
                         break;
                     }
                     ESP_LOGI(TAG, "AFT OUT recv: amount=%lu credits  txn=%s",
@@ -1311,9 +1427,27 @@ void sas_polling_task(void* pvParameters) {
                     // next slow periodic tick (see diagnostics_tick below).
                     query_enabled_features();
                     query_cash_out_limit();
+                    query_aft_transfer_limit();
                     enforce_rte_reporting_off();
-                    report_event(last_reported_exception, last_credits, 0, 0, 0, NULL);
-                    ESP_LOGI(TAG, "REFRESH_DIAGNOSTICS: re-queried LP 0xA0/0xA4, re-asserted LP 0x0E off");
+                    // NOTE: must pass the real last-known coin_in/coin_out here,
+                    // NOT 0/0 -- report_event() forwards these straight into the
+                    // telemetry MQTT message (see serialize_and_publish()), which
+                    // the backend writes unconditionally into the Redis digital
+                    // twin (mqtt-gateway.service.ts processTelemetry()). A stray
+                    // coin_in=0 briefly parks Redis's coin_in at "0" (still
+                    // truthy as a Redis-hash string, so jackpot.service.ts's
+                    // checkSchedule() doesn't skip it) -- if its 2s tick samples
+                    // Redis in that window, `lastCoinIn` for this machine gets
+                    // reset to 0, and the very next real telemetry (arriving
+                    // within ~1s) then looks like a single delta equal to the
+                    // machine's ENTIRE cumulative coin-in, which gets added to
+                    // the Real Jackpot pool in one shot. Found 2026-09-18 while
+                    // reviewing this feature, before it had a chance to fire for
+                    // real on a live tournament.
+                    report_event(last_reported_exception, last_credits,
+                                 real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                                 last_coin_out, 0, NULL);
+                    ESP_LOGI(TAG, "REFRESH_DIAGNOSTICS: re-queried LP 0xA0/0xA4/0x74, re-asserted LP 0x0E off");
                     break;
                 default:
                     ESP_LOGW(TAG, "Unknown command type: %d", cmd.cmd_type);
@@ -1350,10 +1484,28 @@ void sas_polling_task(void* pvParameters) {
                 break;
 
             case SAS_EXC_SLOT_DOOR_OPENED:
+            // Added 2026-09-18: SAS defines 4 more physical-access exception
+            // pairs beyond the main slot door (Appendix A) -- drop door,
+            // card cage, cashbox door/removal, belly door. Found while
+            // investigating "opened a door but Diagnostics still shows
+            // CLOSED": previously only 0x11 set s_door_open, so any of
+            // these firing instead would silently fall through to the
+            // unnamed default case below and never freeze jackpot
+            // wager-inference or show up as door state at all. Treated as
+            // one shared door_open flag (not per-door-type) -- the concern
+            // (service/maintenance access, not real player activity) is the
+            // same regardless of which access point was opened.
+            case SAS_EXC_DROP_DOOR_OPENED:
+            case SAS_EXC_CARD_CAGE_OPENED:
+            case SAS_EXC_CASHBOX_DOOR_OPENED:
+            case SAS_EXC_CASHBOX_REMOVED:
+            case SAS_EXC_BELLY_DOOR_OPENED:
                 jackpot_freeze = true;
+                s_door_open = true;
                 if (is_new_exception) {
-                    ESP_LOGW(TAG, "EXC 0x11: Slot door OPENED -- freezing jackpot wager-inference "
-                                  "until door closes (service access, not real player activity)");
+                    ESP_LOGW(TAG, "EXC 0x%02X: %s -- freezing jackpot wager-inference "
+                                  "until closed (service access, not real player activity)",
+                             exception, exc_name(exception));
                     report_event(exception, last_credits,
                                  real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
                                  last_coin_out, 0, NULL);
@@ -1361,9 +1513,16 @@ void sas_polling_task(void* pvParameters) {
                 break;
 
             case SAS_EXC_SLOT_DOOR_CLOSED:
+            case SAS_EXC_DROP_DOOR_CLOSED:
+            case SAS_EXC_CARD_CAGE_CLOSED:
+            case SAS_EXC_CASHBOX_DOOR_CLOSED:
+            case SAS_EXC_CASHBOX_INSTALLED:
+            case SAS_EXC_BELLY_DOOR_CLOSED:
                 jackpot_freeze = false;
+                s_door_open = false;
                 if (is_new_exception) {
-                    ESP_LOGI(TAG, "EXC 0x12: Slot door CLOSED -- jackpot wager-inference resumed");
+                    ESP_LOGI(TAG, "EXC 0x%02X: %s -- jackpot wager-inference resumed",
+                             exception, exc_name(exception));
                     report_event(exception, last_credits,
                                  real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
                                  last_coin_out, 0, NULL);
@@ -1383,7 +1542,14 @@ void sas_polling_task(void* pvParameters) {
                             ESP_LOGW(TAG, "EXC 0x51: HANDPAY pending – amount=%lu ($%lu.%02lu)",
                                      (unsigned long)hp.handpay_amount,
                                      (unsigned long)(hp_cents / 100), (unsigned long)(hp_cents % 100));
-                            report_event(exception, hp_cents, 0, 0, 0, NULL);
+                            // credits field intentionally carries the handpay
+                            // amount (hp_cents), not real credits -- but
+                            // coin_in/coin_out must still be real values, not
+                            // hardcoded 0 (fixed 2026-09-18, same issue as
+                            // s_last_credits_cents's doc comment).
+                            report_event(exception, hp_cents,
+                                         real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
+                                         last_coin_out, 0, NULL);
                         }
                     } else {
                         ESP_LOGW(TAG, "EXC 0x51: HANDPAY pending – no amount response");
@@ -1569,12 +1735,24 @@ void sas_polling_task(void* pvParameters) {
         // live hardware bring-up the SAS cable may get connected/
         // reconnected to the machine AFTER this board has already booted,
         // so a boot-only query can permanently miss it for the rest of the
-        // session. ~1s cadence (bumped up from an initial ~5s per
-        // follow-up request), same as Meters/Total Coin In above.
-        // query_asset_number() already logs the result (or a warning)
-        // unconditionally on every call.
-        static uint8_t asset_number_tick = 0;
-        if (++asset_number_tick >= 25) {  // every 25 cycles (~1s)
+        // session.
+        //
+        // Slowed back down to ~10s (2026-09-18) -- the ~1s cadence this
+        // briefly had (bumped up from an initial ~5s per a prior follow-up
+        // request) meant an extra Long Poll landed in the same 40ms tick
+        // as General Poll roughly once every second for a value (asset
+        // number) that in practice only ever changes via a deliberate
+        // operator audit-menu edit -- a genuinely rare event, not
+        // something that needs sub-2-second detection. This was one of
+        // several background polls (see meters_tick/coin_in_meter_tick
+        // below, also ~1s) contributing to the real 48ms cycle overrun
+        // observed on MC07 that motivated last_cycle_overrun_ms in the
+        // first place. 10s still means "cable reconnected mid-session" is
+        // noticed well within one operator's attention span, at 1/10th the
+        // bus contention. query_asset_number() already logs the result (or
+        // a warning) unconditionally on every call.
+        static uint16_t asset_number_tick = 0;
+        if (++asset_number_tick >= 250) {  // every 250 cycles (~10s)
             asset_number_tick = 0;
             query_asset_number();
         }
@@ -1615,8 +1793,17 @@ void sas_polling_task(void* pvParameters) {
             diagnostics_tick = 0;
             query_enabled_features();
             query_cash_out_limit();
+            query_aft_transfer_limit();
             enforce_rte_reporting_off();
         }
+
+        // Refresh the cross-function mirrors (see their declaration comment
+        // near s_door_open above) once per iteration, unconditionally --
+        // cheap, and guarantees execute_aft_command() never sees stale data
+        // by more than one 40ms cycle.
+        s_last_credits_cents = last_credits;
+        s_last_coin_out_cents = last_coin_out;
+        s_last_coin_in_cents = real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents;
 
         // ── 5. Strict 40ms cycle boundary ───────────────────────
         // Poll-cycle timing diagnostic (2026-09-17): measure how long this
@@ -1691,6 +1878,14 @@ bool sas_cash_out_limit_known() {
 
 uint32_t sas_get_cash_out_limit_cents() {
     return s_cash_out_limit_cents;
+}
+
+bool sas_aft_transfer_limit_known() {
+    return s_aft_transfer_limit_known;
+}
+
+uint32_t sas_get_aft_transfer_limit_cents() {
+    return s_aft_transfer_limit_cents;
 }
 
 bool sas_rte_guard_ok() {
