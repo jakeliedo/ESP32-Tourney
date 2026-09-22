@@ -556,6 +556,21 @@ size_t sas_build_lp_validation_status(uint8_t* buf, uint8_t address,
  * to accept every denomination the machine's own bill validator hardware
  * supports, i.e. don't restrict anything, matching the unrestricted
  * acceptance LP 0x06 alone already had).
+ *
+ * Fixed 2026-09-19: this frame previously had NO `enable_disable` byte at
+ * all and instead prefixed the whole payload with a bogus SAS-Type-M-style
+ * "length" byte (0x06) -- Table 7.5 (verified against the non-mangled text
+ * extraction of SAS 6.02.pdf, same lesson as the LP 0x74 transfer-limit fix
+ * the day before: `pdftotext -layout` silently drops/misplaces a field in
+ * this exact table) has NO length byte at all, and the real field order
+ * after the command byte is denom_mask(4) -- **enable_disable(1)** --
+ * action_flags(2) -- CRC(2), for the same total 11-byte frame length. The
+ * old code's bogus length byte shifted every subsequent byte by one
+ * position, so the machine received a scrambled denom_mask, an
+ * out-of-range enable_disable value, and a garbage action_flags word --
+ * confirmed on real hardware (2026-09-19) as an explicit NACK (`address |
+ * 0x80`), not silence or a CRC failure, consistent with the machine having
+ * validated the (garbled) fields and rejected them outright.
  * action_flags bit0 controls whether the bill acceptor auto-disables after
  * each accepted bill (SAS_BILL_ACTION_AUTO_DISABLE, the default/legacy
  * behavior matching plain LP 0x06) or stays enabled continuously
@@ -565,14 +580,16 @@ size_t sas_build_lp_validation_status(uint8_t* buf, uint8_t address,
  * Per spec, right below Table 7.5: "The gaming machine may be configured to
  * ignore bills regardless of this message" -- the operator menu can still
  * override this even when the call succeeds.
- * @param buf           Output buffer (min 11 bytes)
- * @param address       SAS machine address
- * @param denom_mask    Bill Denominations bitmask (Table 7.5); 0xFFFFFFFF = accept all
- * @param action_flags  SAS_BILL_ACTION_* (bitwise OR if more bits get defined later)
+ * @param buf             Output buffer (min 11 bytes)
+ * @param address         SAS machine address
+ * @param denom_mask      Bill Denominations bitmask (Table 7.5); 0xFFFFFFFF = accept all
+ * @param enable_disable  0 = disable the denominations in denom_mask, 1 = enable them
+ * @param action_flags    SAS_BILL_ACTION_* (bitwise OR if more bits get defined later)
  * @return frame length (always 11)
  */
 size_t sas_build_lp_configure_bill(uint8_t* buf, uint8_t address,
-                                    uint32_t denom_mask, uint16_t action_flags);
+                                    uint32_t denom_mask, uint8_t enable_disable,
+                                    uint16_t action_flags);
 
 /**
  * Build Long Poll 54 – Send SAS Version ID and Gaming Machine Serial Number.

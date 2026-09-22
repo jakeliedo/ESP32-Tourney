@@ -345,6 +345,21 @@ export class MqttGatewayService implements OnModuleInit, OnModuleDestroy {
       log('info', 'MACHINE_ENABLED', 'Machine re-enabled');
     }
 
+    // Added 2026-09-22: distinguish "SAS link to the physical slot machine
+    // is down" from the MQTT-transport `status` topic's online/offline
+    // (which only reflects whether this board can reach the broker at all).
+    // Firmware now sends an unconditional ~1s heartbeat carrying the real
+    // SlotState even while unresponsive (see sas_polling.cpp's
+    // "Unconditional link-health heartbeat"), so `state` (mapped to
+    // MachineStatus.OFFLINE above via stateToStatus()) actually reaches here
+    // now instead of telemetry going silent the moment the machine stops
+    // answering -- see NHATKY.md 2026-09-22 for the full investigation.
+    if (statusChanged && newStatus === MachineStatus.OFFLINE) {
+      log('abnormal', 'SAS_LINK_DOWN', 'No response from slot machine (SAS link down)');
+    } else if (statusChanged && prevStatus === MachineStatus.OFFLINE) {
+      log('info', 'SAS_LINK_RESTORED', 'Slot machine responding again (SAS link restored)');
+    }
+
     if (data.bv_enabled !== undefined) {
       const prevBv = this.lastBv.get(machineId);
       if (prevBv !== undefined && prevBv !== data.bv_enabled && !statusChanged) {

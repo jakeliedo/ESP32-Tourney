@@ -664,15 +664,19 @@ SasValidationStatusResponse sas_parse_validation_status(const uint8_t* buf, size
 // ─────────────────────────────────────────────────────────────
 
 size_t sas_build_lp_configure_bill(uint8_t* buf, uint8_t address,
-                                    uint32_t denom_mask, uint16_t action_flags) {
+                                    uint32_t denom_mask, uint8_t enable_disable,
+                                    uint16_t action_flags) {
     buf[0] = address;
     buf[1] = SAS_CMD_CONFIGURE_BILL;
-    buf[2] = 0x06;  // length: 6 data bytes follow (4 denom + 2 action), not including CRC
 
-    buf[3] = (uint8_t)(denom_mask);         // LSB
-    buf[4] = (uint8_t)(denom_mask >> 8);
-    buf[5] = (uint8_t)(denom_mask >> 16);
-    buf[6] = (uint8_t)(denom_mask >> 24);   // MSB
+    // Fixed 2026-09-19: NO length byte in this frame (see header doc
+    // comment) -- the old buf[2]=0x06 here was bogus and shifted every
+    // field after it by one byte.
+    buf[2] = (uint8_t)(denom_mask);         // LSB
+    buf[3] = (uint8_t)(denom_mask >> 8);
+    buf[4] = (uint8_t)(denom_mask >> 16);
+    buf[5] = (uint8_t)(denom_mask >> 24);   // MSB
+    buf[6] = enable_disable;                // 0=disable, 1=enable the denoms in denom_mask
     buf[7] = (uint8_t)(action_flags);       // LSB
     buf[8] = (uint8_t)(action_flags >> 8);  // MSB
 

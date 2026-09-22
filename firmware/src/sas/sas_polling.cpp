@@ -95,16 +95,73 @@ static const char* exc_name(uint8_t exc) {
         case 0x1E: return "Belly door CLOSED";
         case 0x1F: return "No activity, waiting for player input (obsolete)";
         case 0x20: return "General tilt";
+        case 0x21: return "Coin in tilt";
+        case 0x22: return "Coin out tilt";
+        case 0x23: return "Hopper empty detected";
+        case 0x24: return "Extra coin paid";
+        case 0x25: return "Diverter malfunction";
         case 0x27: return "Cashbox full detected";
+        // 2026-09-19: bill-acceptor hardware-fault codes (0x28-0x2C) -- added
+        // while chasing an intermittent bill "System Error" on the machine's
+        // own MEI screen. These were previously undecoded ("Unknown"); if the
+        // fault is visible at the SAS layer at all, one of these is the code
+        // to look for in a live capture. Verified against Appendix A (see
+        // header comment) via the non-layout pdftotext Code/Description
+        // column split -- these particular rows are single-line, so the
+        // -layout extraction agreed too.
+        case 0x28: return "Bill jam";
+        case 0x29: return "Bill acceptor hardware failure";
+        case 0x2A: return "Reverse bill detected";
+        case 0x2B: return "Bill rejected";
+        case 0x2C: return "Counterfeit bill detected";
+        case 0x2D: return "Reverse coin in detected";
         case 0x2E: return "Cashbox near full detected";
+        case 0x31: return "CMOS RAM error (data recovered from EEPROM)";
+        case 0x32: return "CMOS RAM error (no data recovered from EEPROM)";
+        case 0x33: return "CMOS RAM error (bad device)";
+        case 0x34: return "EEPROM error (data error)";
+        case 0x35: return "EEPROM error (bad device)";
+        case 0x36: return "EPROM error (different checksum - version changed)";
+        case 0x37: return "EPROM error (bad checksum compare)";
+        case 0x38: return "Partitioned EPROM error (checksum - version changed)";
+        case 0x39: return "Partitioned EPROM error (bad checksum compare)";
+        case 0x3A: return "Memory error reset (operator used self test switch)";
+        case 0x3B: return "Low backup battery detected";
         case 0x3C: return "Operator changed options";
         case 0x3D: return "Cash out ticket has been printed";
         case 0x3E: return "Handpay has been validated";
         case 0x3F: return "Validation ID not configured";
+        case 0x40: return "Reel tilt (unspecified)";
+        case 0x41: return "Reel 1 tilt";
+        case 0x42: return "Reel 2 tilt";
+        case 0x43: return "Reel 3 tilt";
         case 0x44: return "Reel 4 tilt";
+        case 0x45: return "Reel 5 tilt";
+        case 0x46: return "Reel mechanism disconnected";
+        // 2026-09-19: bill-accepted-by-denomination codes (0x47-0x50). Each
+        // successful bill normally reports its specific denomination code;
+        // 0x4F is the generic fallback used when no specific code applies.
+        // A machine alternating between these and the 0x28-0x2C fault codes
+        // above is exactly the "bill board flaky" signature to look for.
+        case 0x47: return "$1.00 bill accepted";
+        case 0x48: return "$5.00 bill accepted";
+        case 0x49: return "$10.00 bill accepted";
+        case 0x4A: return "$20.00 bill accepted";
+        case 0x4B: return "$50.00 bill accepted";
+        case 0x4C: return "$100.00 bill accepted";
+        case 0x4D: return "$2.00 bill accepted";
+        case 0x4E: return "$500.00 bill accepted";
+        case 0x4F: return "Bill accepted (generic)";
+        case 0x50: return "$200.00 bill accepted";
         case 0x51: return "Handpay pending";
         case 0x52: return "Handpay was reset";
+        case 0x53: return "No progressive information received for 5 seconds";
+        case 0x54: return "Progressive win";
+        case 0x55: return "Player has cancelled the handpay request";
+        case 0x56: return "SAS progressive level hit";
         case 0x57: return "System validation request";
+        case 0x60: return "Printer communication error";
+        case 0x61: return "Printer paper out error";
         case 0x66: return "Cash out button pressed";
         case 0x67: return "Ticket has been inserted";
         case 0x68: return "Ticket transfer complete";
@@ -112,7 +169,10 @@ static const char* exc_name(uint8_t exc) {
         case 0x6A: return "AFT request for host cashout";
         case 0x6B: return "AFT request for host to cash out win";
         case 0x6F: return "Game locked";
+        case 0x72: return "Change lamp off";
         case 0x7C: return "Legacy bonus pay awarded";
+        case 0x82: return "Display meters or attendant menu has been entered";
+        case 0x83: return "Display meters or attendant menu has been exited";
         default:   return "Unknown";
     }
 }
@@ -126,11 +186,13 @@ static int     s_retry_count      = 0;
 
 // Real bill-validator / ticket-printer state, ack'd by the machine (not
 // just "we sent the command") -- see report_event() and the CMD_*_BV /
-// CMD_*_PRINTER cases below. bv starts true (no boot-time disable call for
-// it); printer starts false to match the boot-time set_ticket_printing(false)
-// lockdown (see sas_polling_task()'s startup sequence).
+// CMD_*_PRINTER cases below. Both start true: neither is auto-disabled at
+// boot anymore (2026-09-22, explicit request -- see set_ticket_printing()'s
+// doc comment for why the old boot-time lockdown call was removed). Only
+// CMD_ENABLE/DISABLE_BV and CMD_ENABLE/DISABLE_PRINTER (operator-triggered,
+// manual) change these now.
 static bool s_bv_enabled      = true;
-static bool s_printer_enabled = false;
+static bool s_printer_enabled = true;
 
 // AFT registration state (LP 0x73) -- obtained once from the machine and
 // then reused on every LP 0x72 transfer. Added 2026-09-05: transfers kept
@@ -1058,12 +1120,22 @@ static uint32_t query_asset_number() {
 // ── Ticket lockdown (LP 0x7B) ────────────────────────────────────
 
 /**
- * Disallow ticket-based cashout/redemption on the machine, once near boot.
+ * Disallow (or restore) ticket-based cashout/redemption on the machine.
  * Requirement (2026-09-08): while this EVO bridge is the active host, AFT
  * is meant to be the ONLY way credits leave/enter the machine -- a printed
  * cashout ticket or a redeemed ticket-in would move money without going
  * through our AFT/tournament tracking at all. LP 0x7B (Extended Validation
  * Status, Section 15.2) is the real SAS mechanism for this:
+ *
+ * CHANGED 2026-09-22 (explicit request): this used to be auto-invoked with
+ * allow=false a few times near boot, in sas_polling_task()'s startup
+ * sequence, so the lockdown was re-asserted on every board reboot without
+ * an operator asking for it. That automatic call has been removed -- this
+ * function now only runs when CMD_ENABLE_PRINTER / CMD_DISABLE_PRINTER is
+ * received (see the command-queue switch below), i.e. purely manual. A
+ * fresh boot no longer touches this machine-side config at all; whatever
+ * ticket-cashout state the machine was last left in (by a previous manual
+ * command, or its own factory default if never touched) persists.
  *   - bit 0 (printer as cashout device) covers BOTH cashable AND
  *     restricted ticket cashouts per the spec text -- disabling it alone
  *     already blocks all player-initiated ticket printing.
@@ -1149,7 +1221,8 @@ static bool set_ticket_printing(bool allow) {
 static bool configure_bill_persistent_enable() {
     uint8_t frame[11];
     size_t frame_len = sas_build_lp_configure_bill(frame, g_machine_id,
-                                                    0xFFFFFFFFUL, SAS_BILL_ACTION_KEEP_ENABLED);
+                                                    0xFFFFFFFFUL, 1 /* enable */,
+                                                    SAS_BILL_ACTION_KEEP_ENABLED);
     sas_send_frame(frame, frame_len);
     uint8_t resp[1];
     size_t n = sas_receive(resp, 1, SAS_LONG_POLL_TIMEOUT);
@@ -1308,11 +1381,6 @@ void sas_polling_task(void* pvParameters) {
     // registration state. A few retries for the same reason as above.
     for (int attempt = 0; attempt < 3; attempt++) {
         if (query_asset_number() != 0) break;
-    }
-    // Lock down ticket cashout/redemption -- see set_ticket_printing() for
-    // why. A few retries for the same reason as the queries above.
-    for (int attempt = 0; attempt < 3; attempt++) {
-        if (set_ticket_printing(false)) break;
     }
     // Machine diagnostics (LP 0xA0/0xA4/0x0E) -- added 2026-09-17, same
     // "query/enforce once at boot, a few retries" idiom as everything above.
@@ -1620,26 +1688,6 @@ void sas_polling_task(void* pvParameters) {
                     last_credits = cr_cents;
                 }
 
-                // Telemetry used to only get re-published via the Meters
-                // (LP 0xAF) success path below, every ~1s -- but not every
-                // machine responds to 0xAF (confirmed on at least one real
-                // EGT unit, see CLAUDE.md SAS debug log). On such a machine,
-                // once the initial connect-time telemetry burst went out,
-                // NOTHING ever queued another one again: General Poll/Credits
-                // kept succeeding fine (SAS link healthy), but with no new
-                // exception and no Meters response, report_event() was never
-                // called again -- board looked dead in the DB/control-panel
-                // indefinitely despite SAS working the whole time (found
-                // 2026-09-16). Fire an independent heartbeat here, gated on
-                // the credits poll succeeding (every 200ms) instead of on
-                // Meters, throttled to ~1s so it doesn't flood MQTT.
-                static uint8_t credits_heartbeat_tick = 0;
-                if (++credits_heartbeat_tick >= 5) {  // every 5 credits-poll cycles (~1s)
-                    credits_heartbeat_tick = 0;
-                    report_event(SAS_EXC_NO_ACTIVITY, last_credits,
-                                 real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents,
-                                 last_coin_out, 0, NULL);
-                }
             } else {
                 ESP_LOGW(TAG, "Credits poll: response CRC/parse error (n=%d)", (int)n);
                 s_retry_count++;
@@ -1804,6 +1852,37 @@ void sas_polling_task(void* pvParameters) {
         s_last_credits_cents = last_credits;
         s_last_coin_out_cents = last_coin_out;
         s_last_coin_in_cents = real_coin_in_valid ? real_coin_in_cents : inferred_wagered_cents;
+
+        // ── 4d. Unconditional link-health heartbeat (2026-09-22) ─
+        // Fires every ~1s NO MATTER what happened elsewhere this cycle --
+        // unlike every other report_event() call site in this file (all
+        // gated on some SAS response succeeding), this one is the only
+        // thing that keeps telling the backend "here's the current state"
+        // once the machine stops responding at all. Without it: the
+        // Credits-poll-failure branch below sets s_state = SLOT_STATE_OFFLINE
+        // after SAS_MAX_RETRIES, and MachineEvent.state already carries that
+        // (report_event() always reads s_state -- see its body), and the
+        // backend's stateToStatus() already maps state 5 -> OFFLINE
+        // correctly -- but with no report_event() call left to fire while
+        // offline (this replaces the old credits-gated heartbeat that used
+        // to live inside the `if (cr.valid)` branch above, added
+        // 2026-09-16 for a different reason -- LP 0xAF not responding on
+        // some machines -- and which went silent the moment the *credits*
+        // poll itself started failing), that correct mapping never actually
+        // reached MQTT. Found 2026-09-22: control-panel showed a machine
+        // whose SAS link was down as ONLINE (that status topic is pure
+        // MQTT-connectivity, unrelated to SAS) with credits/coin_in/coin_out
+        // frozen at their last real values forever, no explicit signal
+        // anywhere that the physical machine had stopped answering.
+        // s_last_*_cents (refreshed just above) are always the last REAL
+        // reading, never 0/garbage, so this is safe to send even while
+        // offline.
+        static uint8_t heartbeat_tick = 0;
+        if (++heartbeat_tick >= 25) {  // every 25 cycles (~1s)
+            heartbeat_tick = 0;
+            report_event(SAS_EXC_NO_ACTIVITY, s_last_credits_cents,
+                         s_last_coin_in_cents, s_last_coin_out_cents, 0, NULL);
+        }
 
         // ── 5. Strict 40ms cycle boundary ───────────────────────
         // Poll-cycle timing diagnostic (2026-09-17): measure how long this
